@@ -3,6 +3,7 @@ import type { RunCommandResponse } from "./command.types";
 export type AppErrorCode =
   | "NOT_A_REPO"
   | "CMD_FAILED"
+  | "DIRTY_SWITCH_BLOCKED"
   | "GH_NOT_AUTHED"
   | "GH_NOT_INSTALLED"
   | "NO_REMOTE"

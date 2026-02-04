@@ -58,10 +58,14 @@ export function RepoDashboardPage(): React.JSX.Element {
   const [repoPath, setRepoPath] = React.useState<RepoPath | null>(null);
   const [repoInfo, setRepoInfo] = React.useState<RepoInfo | null>(null);
   const [error, setError] = React.useState<AppError | null>(null);
+  const [branchError, setBranchError] = React.useState<AppError | null>(null);
   const [prError, setPrError] = React.useState<AppError | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [selectedPaths, setSelectedPaths] = React.useState<ReadonlySet<string>>(() => new Set());
   const [commitMessage, setCommitMessage] = React.useState("");
+  const [newBranchName, setNewBranchName] = React.useState("");
+  const [branches, setBranches] = React.useState<readonly string[]>([]);
+  const [switchBranch, setSwitchBranch] = React.useState<string>("");
   const [pushedBranch, setPushedBranch] = React.useState<string | null>(null);
   const [prTitle, setPrTitle] = React.useState("");
   const [prBody, setPrBody] = React.useState("");
@@ -93,13 +97,34 @@ export function RepoDashboardPage(): React.JSX.Element {
     if (repoInfo.branch !== pushedBranch) setPushedBranch(null);
   }, [repoInfo, pushedBranch]);
 
+  async function refreshBranches(path: RepoPath, preferred?: string): Promise<void> {
+    const res = await repoService.listBranches(path);
+    if (!res.ok) {
+      setBranchError(res.error);
+      setBranches([]);
+      setSwitchBranch("");
+      return;
+    }
+    const list = res.data;
+    setBranches(list);
+    setSwitchBranch((prev) => {
+      if (preferred && list.includes(preferred)) return preferred;
+      if (prev.trim().length > 0) return prev;
+      return list[0] ?? "";
+    });
+  }
+
   async function onPickFolder(): Promise<void> {
     setError(null);
+    setBranchError(null);
     setPrError(null);
     setLoading(true);
     setRepoInfo(null);
     setSelectedPaths(new Set());
     setCommitMessage("");
+    setNewBranchName("");
+    setBranches([]);
+    setSwitchBranch("");
     setPushedBranch(null);
     setPullRequest(null);
     setPrTitle("");
@@ -136,6 +161,7 @@ export function RepoDashboardPage(): React.JSX.Element {
 
       setRepoInfo(res.data);
       setSelectedPaths(new Set());
+      await refreshBranches(rp.data, res.data.branch);
       setLoading(false);
     } catch (_e: unknown) {
       setLoading(false);
@@ -146,6 +172,7 @@ export function RepoDashboardPage(): React.JSX.Element {
   async function onStageAll(): Promise<void> {
     if (!repoInfo) return;
     setError(null);
+    setBranchError(null);
     setPrError(null);
     setLoading(true);
     const res = await repoService.stageAll(repoInfo.path);
@@ -162,6 +189,7 @@ export function RepoDashboardPage(): React.JSX.Element {
   async function onStageSelected(): Promise<void> {
     if (!repoInfo) return;
     setError(null);
+    setBranchError(null);
     setPrError(null);
     setLoading(true);
     const res = await repoService.stageFiles(repoInfo.path, selectedStageableFiles);
@@ -183,6 +211,7 @@ export function RepoDashboardPage(): React.JSX.Element {
       return;
     }
     setError(null);
+    setBranchError(null);
     setPrError(null);
     setLoading(true);
     const res = await repoService.commit(repoInfo.path, msg.data);
@@ -194,6 +223,46 @@ export function RepoDashboardPage(): React.JSX.Element {
     setRepoInfo(res.data);
     setCommitMessage("");
     setSelectedPaths(new Set());
+    setLoading(false);
+  }
+
+  async function onCreateAndSwitchBranch(): Promise<void> {
+    if (!repoInfo) return;
+    const parsed = parseBranchName(newBranchName);
+    if (!parsed.ok) {
+      setBranchError(parsed.error);
+      return;
+    }
+    setBranchError(null);
+    setPrError(null);
+    setLoading(true);
+    const res = await repoService.createAndSwitchBranch(repoInfo.path, parsed.data);
+    if (!res.ok) {
+      setBranchError(res.error);
+      setLoading(false);
+      return;
+    }
+    setRepoInfo(res.data);
+    setNewBranchName("");
+    await refreshBranches(repoInfo.path, res.data.branch);
+    setLoading(false);
+  }
+
+  async function onSwitchBranch(): Promise<void> {
+    if (!repoInfo) return;
+    const b = switchBranch.trim();
+    if (b.length === 0) return;
+    setBranchError(null);
+    setPrError(null);
+    setLoading(true);
+    const res = await repoService.switchToBranch(repoInfo.path, b);
+    if (!res.ok) {
+      setBranchError(res.error);
+      setLoading(false);
+      return;
+    }
+    setRepoInfo(res.data);
+    await refreshBranches(repoInfo.path, res.data.branch);
     setLoading(false);
   }
 
@@ -274,6 +343,9 @@ export function RepoDashboardPage(): React.JSX.Element {
     pushedBranch !== currentBranch ||
     prTitle.trim().length === 0;
   const viewDisabled = !repoInfo || loading;
+
+  const createBranchDisabled = !repoInfo || loading || !parseBranchName(newBranchName).ok;
+  const switchBranchDisabled = !repoInfo || loading || switchBranch.trim().length === 0;
 
   return (
     <div style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
@@ -374,6 +446,73 @@ export function RepoDashboardPage(): React.JSX.Element {
 
           <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontWeight: 700 }}>Branch</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => void onCreateAndSwitchBranch()}
+                  disabled={createBranchDisabled}
+                  style={buttonStyle(createBranchDisabled)}
+                >
+                  Create &amp; Switch
+                </button>
+                <button
+                  onClick={() => void onSwitchBranch()}
+                  disabled={switchBranchDisabled}
+                  style={buttonStyle(switchBranchDisabled)}
+                >
+                  Switch
+                </button>
+              </div>
+            </div>
+
+            {branchError ? <ErrorBlock error={branchError} /> : null}
+
+            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 240px", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>New branch name</div>
+                <input
+                  type="text"
+                  value={newBranchName}
+                  onChange={(e) => setNewBranchName(e.target.value)}
+                  placeholder="feature/my-change"
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(127,127,127,0.35)",
+                    background: "transparent"
+                  }}
+                  disabled={!repoInfo || loading}
+                />
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Switch branch</div>
+                <select
+                  value={switchBranch}
+                  onChange={(e) => setSwitchBranch(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(127,127,127,0.35)",
+                    background: "transparent"
+                  }}
+                  disabled={!repoInfo || loading || branches.length === 0}
+                >
+                  {branches.length === 0 ? <option value="">(no branches)</option> : null}
+                  {branches.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ fontWeight: 700 }}>Pull Request</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button
@@ -399,6 +538,12 @@ export function RepoDashboardPage(): React.JSX.Element {
             </div>
 
             {prError ? <ErrorBlock error={prError} /> : null}
+
+            {currentBranch.trim() === "main" ? (
+              <div style={{ marginTop: 8, opacity: 0.75, fontSize: 12 }}>
+                Create a feature branch to open a PR.
+              </div>
+            ) : null}
 
             <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 180px", gap: 10 }}>
               <div style={{ display: "grid", gap: 10 }}>

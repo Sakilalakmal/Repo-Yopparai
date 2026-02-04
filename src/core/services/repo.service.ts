@@ -1,4 +1,4 @@
-import type { CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
+import type { BranchName, CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
 import { err, ok, type Result } from "../shell/command.errors";
 import { gitService, type GitService } from "./git.service";
 import { parseBranchName } from "../utils/guard";
@@ -71,6 +71,38 @@ export class RepoService {
     if (!origin.ok) return origin;
 
     return this.git.pushSetUpstream(path, branch.data);
+  }
+
+  async createAndSwitchBranch(path: RepoPath, branch: BranchName): Promise<Result<RepoInfo>> {
+    const created = await this.git.createAndCheckoutBranch(path, branch);
+    if (!created.ok) return created;
+    return this.loadRepo(path);
+  }
+
+  async switchToBranch(path: RepoPath, branch: string): Promise<Result<RepoInfo>> {
+    const statusRes = await this.git.getStatus(path);
+    if (!statusRes.ok) return statusRes;
+    const hasStaged = statusRes.data.some((c) => c.isStaged);
+    if (hasStaged) {
+      return err("DIRTY_SWITCH_BLOCKED", "You have staged changes. Commit or unstage before switching branches.");
+    }
+
+    const trimmed = branch.trim();
+    let target: BranchName | "main";
+    if (trimmed === "main") target = "main";
+    else {
+      const parsed = parseBranchName(trimmed);
+      if (!parsed.ok) return parsed;
+      target = parsed.data;
+    }
+
+    const switched = await this.git.checkoutBranch(path, target);
+    if (!switched.ok) return switched;
+    return this.loadRepo(path);
+  }
+
+  async listBranches(path: RepoPath): Promise<Result<string[]>> {
+    return this.git.listBranches(path);
   }
 }
 

@@ -1,5 +1,4 @@
-import type { CommitMessage, RepoPath } from "../domain/repo";
-import type { BaseBranchName, BranchName } from "../domain/git";
+import type { BaseBranchName, BranchName, CommitMessage, RepoPath } from "../domain/repo";
 import type { RunCommandResponse } from "../shell/command.types";
 import { err, ok, type Result } from "../shell/command.errors";
 
@@ -27,21 +26,15 @@ export function parseCommitMessage(input: string): Result<CommitMessage> {
   return ok(trimmed as CommitMessage);
 }
 
-function looksLikeBranchName(name: string): boolean {
-  if (name.length === 0) return false;
-  if (name === "HEAD") return false;
-  if (/\s/.test(name)) return false;
-  if (name.includes("..")) return false;
-  if (name.includes("\\") || name.includes("~") || name.includes("^") || name.includes(":")) return false;
-  if (name.endsWith(".") || name.endsWith("/") || name.startsWith("/") || name.includes("@{")) return false;
-  if (name.includes("?") || name.includes("*") || name.includes("[") || name.includes("]")) return false;
-  if (name.includes("//")) return false;
-  return true;
-}
-
 export function parseBranchName(input: string): Result<BranchName> {
   const trimmed = input.trim();
-  if (!looksLikeBranchName(trimmed)) {
+  if (trimmed.length === 0) return err("INVALID_INPUT", "Branch name is required.");
+  if (/\s/.test(trimmed)) return err("INVALID_INPUT", "Branch name cannot contain spaces.");
+  if (trimmed.startsWith("-")) return err("INVALID_INPUT", "Branch name cannot start with '-'.");
+  if (trimmed.endsWith("/")) return err("INVALID_INPUT", "Branch name cannot end with '/'.");
+  if (trimmed.includes("..")) return err("INVALID_INPUT", "Branch name cannot contain '..'.");
+  if (trimmed.includes("//")) return err("INVALID_INPUT", "Branch name cannot contain '//'.");
+  if (!/^[A-Za-z0-9._][A-Za-z0-9/_.-]*$/.test(trimmed)) {
     return err("INVALID_INPUT", "Invalid branch name.");
   }
   return ok(trimmed as BranchName);
@@ -49,10 +42,8 @@ export function parseBranchName(input: string): Result<BranchName> {
 
 export function parseBaseBranchName(input: string): Result<BaseBranchName> {
   const trimmed = input.trim();
-  if (!looksLikeBranchName(trimmed)) {
-    return err("INVALID_INPUT", "Invalid base branch name.");
-  }
-  return ok(trimmed as BaseBranchName);
+  if (trimmed !== "main") return err("INVALID_INPUT", "Base branch must be 'main'.");
+  return ok("main" as BaseBranchName);
 }
 
 export function isRunCommandResponse(value: unknown): value is RunCommandResponse {

@@ -1,4 +1,4 @@
-import type { BaseBranchName, BranchName } from "../domain/git";
+import type { BaseBranchName, BranchName } from "../domain/repo";
 import type { PullRequest } from "../domain/pr";
 import { parseGhPrJson } from "../parsers/ghPr.parser";
 import { commandRunner } from "../shell/commandRunner";
@@ -83,6 +83,10 @@ export class GitHubService {
     body?: string;
     draft?: boolean;
   }): Promise<Result<PullRequest>> {
+    if ((params.head as string).trim() === "main") {
+      return err("INVALID_INPUT", "Create a feature branch to open a PR.");
+    }
+
     const installed = await this.ensureGhInstalled(params.repoPath);
     if (!installed.ok) return installed;
     const authed = await this.ensureGhAuthed(params.repoPath);

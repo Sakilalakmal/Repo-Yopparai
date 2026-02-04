@@ -1,5 +1,4 @@
-import type { CommitMessage, FileChange, RepoPath } from "../domain/repo";
-import type { BranchName } from "../domain/git";
+import type { BranchName, CommitMessage, FileChange, RepoPath } from "../domain/repo";
 import { parseGitStatusPorcelainV1 } from "../parsers/gitStatus.parser";
 import { commandRunner } from "../shell/commandRunner";
 import { commandToString, err, isTimeoutResponse, ok, type Result } from "../shell/command.errors";
@@ -125,6 +124,44 @@ export class GitService {
 
   async commit(path: RepoPath, message: CommitMessage): Promise<Result<void>> {
     return this.runGitVoid(path, "commit", ["commit", "-m", message as string], 60_000);
+  }
+
+  async createAndCheckoutBranch(path: RepoPath, branch: BranchName): Promise<Result<void>> {
+    const b = (branch as string).trim();
+    if (b.length === 0) return err("INVALID_INPUT", "Invalid branch name.");
+    return this.runGitVoid(path, "createAndCheckoutBranch", ["checkout", "-b", b], 30_000);
+  }
+
+  async checkoutBranch(path: RepoPath, branch: BranchName | "main"): Promise<Result<void>> {
+    const b = typeof branch === "string" ? branch.trim() : (branch as string).trim();
+    if (b.length === 0) return err("INVALID_INPUT", "Invalid branch name.");
+    return this.runGitVoid(path, "checkoutBranch", ["checkout", b], 30_000);
+  }
+
+  async listBranches(path: RepoPath): Promise<Result<string[]>> {
+    const args = ["branch", "--format=%(refname:short)"];
+    const res = await commandRunner.run({
+      name: "listBranches",
+      cwd: cwdOf(path),
+      program: "git",
+      args,
+      timeoutMs: 10_000
+    });
+    if (!res.ok) return res;
+    if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
+    if (res.data.exitCode !== 0) {
+      return err("CMD_FAILED", "Failed to list branches.", {
+        exitCode: res.data.exitCode,
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString("listBranches", "git", args)
+      });
+    }
+    const branches = res.data.stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return ok(branches);
   }
 
   async ensureOriginRemote(path: RepoPath): Promise<Result<string>> {
