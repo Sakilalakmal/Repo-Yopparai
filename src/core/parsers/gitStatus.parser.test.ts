@@ -11,20 +11,26 @@ describe("parseGitStatusPorcelainV1", () => {
       indexStatus: "?",
       worktreeStatus: "?",
       isStaged: false,
-      canStage: true
+      stageable: true
     });
   });
 
   it("marks staged when indexStatus is not space", () => {
     const changes = parseGitStatusPorcelainV1("M  staged.txt\n");
     expect(changes[0]?.isStaged).toBe(true);
-    expect(changes[0]?.canStage).toBe(false);
+    expect(changes[0]?.stageable).toBe(false);
   });
 
   it("marks modified unstaged as stageable", () => {
     const changes = parseGitStatusPorcelainV1(" M modified.txt\n");
     expect(changes[0]?.isStaged).toBe(false);
-    expect(changes[0]?.canStage).toBe(true);
+    expect(changes[0]?.stageable).toBe(true);
+  });
+
+  it("supports stagedCount via isStaged", () => {
+    const changes = parseGitStatusPorcelainV1(["M  a.txt", " M b.txt", "A  c.txt", "?? d.txt", ""].join("\n"));
+    const stagedCount = changes.filter((c) => c.isStaged).length;
+    expect(stagedCount).toBe(2);
   });
 });
 

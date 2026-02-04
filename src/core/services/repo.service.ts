@@ -1,10 +1,15 @@
 import type { BranchName, CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
+import type { PullRequest } from "../domain/pr";
 import { err, ok, type Result } from "../shell/command.errors";
 import { gitService, type GitService } from "./git.service";
-import { parseBranchName } from "../utils/guard";
+import { githubService, type GitHubService } from "./github.service";
+import { parseBaseBranchName, parseBranchName } from "../utils/guard";
 
 export class RepoService {
-  constructor(private readonly git: GitService) {}
+  constructor(
+    private readonly git: GitService,
+    private readonly github: GitHubService
+  ) {}
 
   async loadRepo(path: RepoPath): Promise<Result<RepoInfo>> {
     const verified = await this.git.verifyRepo(path);
@@ -16,10 +21,17 @@ export class RepoService {
     const statusRes = await this.git.getStatus(path);
     if (!statusRes.ok) return statusRes;
 
+    const stagedCount = statusRes.data.filter((c) => c.isStaged).length;
+    const stageableCount = statusRes.data.filter((c) => c.stageable).length;
+    const hasUntracked = statusRes.data.some((c) => c.kind === "untracked");
+
     const info: RepoInfo = {
       path,
       branch: branchRes.data,
       isClean: statusRes.data.length === 0,
+      stagedCount,
+      stageableCount,
+      hasUntracked,
       changes: statusRes.data
     };
     return ok(info);
@@ -80,13 +92,6 @@ export class RepoService {
   }
 
   async switchToBranch(path: RepoPath, branch: string): Promise<Result<RepoInfo>> {
-    const statusRes = await this.git.getStatus(path);
-    if (!statusRes.ok) return statusRes;
-    const hasStaged = statusRes.data.some((c) => c.isStaged);
-    if (hasStaged) {
-      return err("DIRTY_SWITCH_BLOCKED", "You have staged changes. Commit or unstage before switching branches.");
-    }
-
     const trimmed = branch.trim();
     let target: BranchName | "main";
     if (trimmed === "main") target = "main";
@@ -104,7 +109,91 @@ export class RepoService {
   async listBranches(path: RepoPath): Promise<Result<string[]>> {
     return this.git.listBranches(path);
   }
+
+  async createBranchFlow(path: RepoPath, branch: BranchName): Promise<Result<RepoInfo>> {
+    const current = await this.loadRepo(path);
+    if (!current.ok) return current;
+    if (current.data.stagedCount > 0) {
+      return err("DIRTY_SWITCH_BLOCKED", "You have staged changes. Commit or unstage before switching branches.");
+    }
+    const created = await this.git.createAndCheckoutBranch(path, branch);
+    if (!created.ok) return created;
+    return this.loadRepo(path);
+  }
+
+  async stageAllUntrackedFlow(path: RepoPath): Promise<Result<RepoInfo>> {
+    const statusRes = await this.git.getStatus(path);
+    if (!statusRes.ok) return statusRes;
+    const untracked = statusRes.data.filter((c) => c.kind === "untracked").map((c) => c.path);
+    if (untracked.length === 0) return this.loadRepo(path);
+    const staged = await this.git.stageFiles(path, untracked);
+    if (!staged.ok) return staged;
+    return this.loadRepo(path);
+  }
+
+  async commitFlow(path: RepoPath, message: CommitMessage): Promise<Result<RepoInfo>> {
+    const committed = await this.git.commit(path, message);
+    if (!committed.ok) return committed;
+    return this.loadRepo(path);
+  }
+
+  async publishFlow(path: RepoPath): Promise<Result<void>> {
+    const branchRes = await this.git.getBranch(path);
+    if (!branchRes.ok) return branchRes;
+    if (branchRes.data.trim() === "main") {
+      return err("INVALID_INPUT", "Create a feature branch first.");
+    }
+
+    const branch = parseBranchName(branchRes.data);
+    if (!branch.ok) return branch;
+
+    const origin = await this.git.ensureOriginRemote(path);
+    if (!origin.ok) return origin;
+
+    return this.git.pushSetUpstream(path, branch.data);
+  }
+
+  async ensurePrFlow(repoPath: RepoPath, titleInput: string, body?: string): Promise<Result<PullRequest>> {
+    const repo = await this.loadRepo(repoPath);
+    if (!repo.ok) return repo;
+    if (repo.data.branch.trim() === "main") {
+      return err("INVALID_INPUT", "Create a feature branch first.");
+    }
+    const branch = parseBranchName(repo.data.branch);
+    if (!branch.ok) return branch;
+
+    const viewed = await this.github.viewPrForCurrentBranch(repoPath);
+    if (viewed.ok) return viewed;
+    if (viewed.error.code !== "PR_NOT_FOUND") return viewed;
+
+    const title = titleInput.trim();
+    if (title.length === 0) return err("INVALID_INPUT", "PR title is required to create a PR.");
+
+    const baseRes = parseBaseBranchName("main");
+    if (!baseRes.ok) return baseRes;
+    const base = baseRes.data;
+    const head = branch.data;
+    if (body) return this.github.createPr({ repoPath, base, head, title, body });
+    return this.github.createPr({ repoPath, base, head, title });
+  }
+
+  async mergeAndSyncMainFlow(path: RepoPath, prNumber: number): Promise<Result<RepoInfo>> {
+    const installed = await this.github.ensureGhInstalled(path);
+    if (!installed.ok) return installed;
+    const authed = await this.github.ensureGhAuthed(path);
+    if (!authed.ok) return authed;
+
+    const merged = await this.github.mergePrSquashDeleteBranch(path, prNumber);
+    if (!merged.ok) return merged;
+
+    const checkedOut = await this.git.checkoutMain(path);
+    if (!checkedOut.ok) return checkedOut;
+
+    const pulled = await this.git.pullMain(path);
+    if (!pulled.ok) return pulled;
+
+    return this.loadRepo(path);
+  }
 }
 
-export const repoService = new RepoService(gitService);
-
+export const repoService = new RepoService(gitService, githubService);

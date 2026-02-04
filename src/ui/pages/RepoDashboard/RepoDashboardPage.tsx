@@ -3,49 +3,39 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { RepoInfo, RepoPath } from "../../../core/domain/repo";
 import type { PullRequest } from "../../../core/domain/pr";
 import type { AppError } from "../../../core/shell/command.errors";
-import { githubService } from "../../../core/services/github.service";
 import { repoService } from "../../../core/services/repo.service";
-import { parseBaseBranchName, parseBranchName, parseCommitMessage, toRepoPath } from "../../../core/utils/guard";
+import { parseBranchName, parseCommitMessage, toRepoPath } from "../../../core/utils/guard";
+import { computeWorkflowStep } from "../../../core/utils/workflow";
 import { CommandLogPanel } from "../../components/CommandLogPanel/CommandLogPanel";
 import { FileChangeList } from "../../components/FileChangeList/FileChangeList";
 import { StatusBadge } from "../../components/StatusBadge/StatusBadge";
-
-function buttonStyle(disabled: boolean): React.CSSProperties {
-  return {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid rgba(127,127,127,0.35)",
-    background: "transparent",
-    fontWeight: 700,
-    opacity: disabled ? 0.5 : 1
-  };
-}
+import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
+import { Input } from "../../components/ui/input";
+import { Separator } from "../../components/ui/separator";
+import { Textarea } from "../../components/ui/textarea";
 
 function ErrorBlock(props: { error: AppError }): React.JSX.Element {
   const detailsText = props.error.details ? JSON.stringify(props.error.details, null, 2) : null;
   return (
-    <div style={{ marginTop: 10 }}>
-      <StatusBadge label={props.error.code} variant="error" />
-      <div style={{ marginTop: 8, fontWeight: 650 }}>{props.error.message}</div>
+    <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-3">
+      <div className="flex items-center gap-2">
+        <StatusBadge label={props.error.code} variant="error" />
+        <div className="font-semibold">{props.error.message}</div>
+      </div>
+
       {props.error.code === "GH_NOT_AUTHED" ? (
-        <div style={{ marginTop: 6, opacity: 0.85 }}>
-          Run: <code>gh auth login</code>
+        <div className="mt-2 text-sm text-muted-foreground">
+          Run: <code className="rounded bg-muted px-1 py-0.5">gh auth login</code>
         </div>
       ) : null}
+
       {detailsText ? (
-        <details style={{ marginTop: 10 }}>
-          <summary style={{ cursor: "pointer", opacity: 0.85 }}>Details</summary>
-          <pre
-            style={{
-              marginTop: 8,
-              padding: 10,
-              borderRadius: 8,
-              border: "1px solid rgba(127,127,127,0.25)",
-              background: "rgba(0,0,0,0.15)",
-              overflow: "auto",
-              maxHeight: 240
-            }}
-          >
+        <details className="mt-3">
+          <summary className="cursor-pointer text-sm text-muted-foreground">Details</summary>
+          <pre className="mt-2 max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
             {detailsText}
           </pre>
         </details>
@@ -58,28 +48,27 @@ export function RepoDashboardPage(): React.JSX.Element {
   const [repoPath, setRepoPath] = React.useState<RepoPath | null>(null);
   const [repoInfo, setRepoInfo] = React.useState<RepoInfo | null>(null);
   const [error, setError] = React.useState<AppError | null>(null);
-  const [branchError, setBranchError] = React.useState<AppError | null>(null);
-  const [prError, setPrError] = React.useState<AppError | null>(null);
   const [loading, setLoading] = React.useState(false);
+
+  const [newBranchName, setNewBranchName] = React.useState("");
+  const [autoSelectUntracked, setAutoSelectUntracked] = React.useState(true);
   const [selectedPaths, setSelectedPaths] = React.useState<ReadonlySet<string>>(() => new Set());
   const [commitMessage, setCommitMessage] = React.useState("");
-  const [newBranchName, setNewBranchName] = React.useState("");
-  const [branches, setBranches] = React.useState<readonly string[]>([]);
-  const [switchBranch, setSwitchBranch] = React.useState<string>("");
-  const [pushedBranch, setPushedBranch] = React.useState<string | null>(null);
+
+  const [isPublished, setIsPublished] = React.useState(false);
   const [prTitle, setPrTitle] = React.useState("");
   const [prBody, setPrBody] = React.useState("");
-  const [prBase, setPrBase] = React.useState("main");
   const [pullRequest, setPullRequest] = React.useState<PullRequest | null>(null);
 
-  const stageableCount = repoInfo ? repoInfo.changes.filter((c) => c.canStage).length : 0;
-  const stagedCount = repoInfo ? repoInfo.changes.filter((c) => c.isStaged).length : 0;
+  const [logOpen, setLogOpen] = React.useState(false);
+
   const currentBranch = repoInfo?.branch ?? "";
+  const isOnMain = currentBranch.trim() === "main";
+  const workflowStep = repoInfo ? computeWorkflowStep(repoInfo, pullRequest, isPublished) : null;
 
   const selectedStageableFiles = React.useMemo(() => {
     if (!repoInfo) return [];
-    const set = selectedPaths;
-    return repoInfo.changes.filter((c) => set.has(c.path) && c.canStage).map((c) => c.path);
+    return repoInfo.changes.filter((c) => selectedPaths.has(c.path) && c.stageable).map((c) => c.path);
   }, [repoInfo, selectedPaths]);
 
   function toggleSelected(path: string): void {
@@ -91,45 +80,42 @@ export function RepoDashboardPage(): React.JSX.Element {
     });
   }
 
+  const lastBranchRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!repoInfo) return;
-    if (pushedBranch === null) return;
-    if (repoInfo.branch !== pushedBranch) setPushedBranch(null);
-  }, [repoInfo, pushedBranch]);
+    const current = repoInfo.branch.trim();
+    const prev = lastBranchRef.current;
+    if (prev !== null && prev !== current) setIsPublished(false);
+    lastBranchRef.current = current;
 
-  async function refreshBranches(path: RepoPath, preferred?: string): Promise<void> {
-    const res = await repoService.listBranches(path);
-    if (!res.ok) {
-      setBranchError(res.error);
-      setBranches([]);
-      setSwitchBranch("");
-      return;
-    }
-    const list = res.data;
-    setBranches(list);
-    setSwitchBranch((prev) => {
-      if (preferred && list.includes(preferred)) return preferred;
-      if (prev.trim().length > 0) return prev;
-      return list[0] ?? "";
+    if (!pullRequest) return;
+    if ((pullRequest.state === "MERGED" || pullRequest.state === "CLOSED") && current === "main") return;
+    if (pullRequest.headRefName.trim() !== current) setPullRequest(null);
+  }, [repoInfo, pullRequest]);
+
+  React.useEffect(() => {
+    if (!repoInfo || !autoSelectUntracked) return;
+    const untracked = repoInfo.changes.filter((c) => c.kind === "untracked" && c.stageable).map((c) => c.path);
+    if (untracked.length === 0) return;
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      for (const p of untracked) next.add(p);
+      return next;
     });
-  }
+  }, [repoInfo, autoSelectUntracked]);
 
   async function onPickFolder(): Promise<void> {
     setError(null);
-    setBranchError(null);
-    setPrError(null);
     setLoading(true);
     setRepoInfo(null);
+    setRepoPath(null);
     setSelectedPaths(new Set());
     setCommitMessage("");
     setNewBranchName("");
-    setBranches([]);
-    setSwitchBranch("");
-    setPushedBranch(null);
+    setIsPublished(false);
     setPullRequest(null);
     setPrTitle("");
     setPrBody("");
-    setPrBase("main");
 
     try {
       const selected = await open({
@@ -161,7 +147,6 @@ export function RepoDashboardPage(): React.JSX.Element {
 
       setRepoInfo(res.data);
       setSelectedPaths(new Set());
-      await refreshBranches(rp.data, res.data.branch);
       setLoading(false);
     } catch (_e: unknown) {
       setLoading(false);
@@ -169,13 +154,46 @@ export function RepoDashboardPage(): React.JSX.Element {
     }
   }
 
-  async function onStageAll(): Promise<void> {
+  async function onCreateAndSwitchBranch(): Promise<void> {
+    if (!repoInfo) return;
+    const parsed = parseBranchName(newBranchName);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    setError(null);
+    setLoading(true);
+    const res = await repoService.createBranchFlow(repoInfo.path, parsed.data);
+    if (!res.ok) {
+      setError(res.error);
+      setLoading(false);
+      return;
+    }
+    setRepoInfo(res.data);
+    setNewBranchName("");
+    setSelectedPaths(new Set());
+    setLoading(false);
+  }
+
+  async function onTrackUntracked(): Promise<void> {
     if (!repoInfo) return;
     setError(null);
-    setBranchError(null);
-    setPrError(null);
     setLoading(true);
-    const res = await repoService.stageAll(repoInfo.path);
+    const res = await repoService.stageAllUntrackedFlow(repoInfo.path);
+    if (!res.ok) {
+      setError(res.error);
+      setLoading(false);
+      return;
+    }
+    setRepoInfo(res.data);
+    setLoading(false);
+  }
+
+  async function onStageSelected(): Promise<void> {
+    if (!repoInfo) return;
+    setError(null);
+    setLoading(true);
+    const res = await repoService.stageFiles(repoInfo.path, selectedStageableFiles);
     if (!res.ok) {
       setError(res.error);
       setLoading(false);
@@ -186,13 +204,11 @@ export function RepoDashboardPage(): React.JSX.Element {
     setLoading(false);
   }
 
-  async function onStageSelected(): Promise<void> {
+  async function onStageAll(): Promise<void> {
     if (!repoInfo) return;
     setError(null);
-    setBranchError(null);
-    setPrError(null);
     setLoading(true);
-    const res = await repoService.stageFiles(repoInfo.path, selectedStageableFiles);
+    const res = await repoService.stageAll(repoInfo.path);
     if (!res.ok) {
       setError(res.error);
       setLoading(false);
@@ -211,10 +227,8 @@ export function RepoDashboardPage(): React.JSX.Element {
       return;
     }
     setError(null);
-    setBranchError(null);
-    setPrError(null);
     setLoading(true);
-    const res = await repoService.commit(repoInfo.path, msg.data);
+    const res = await repoService.commitFlow(repoInfo.path, msg.data);
     if (!res.ok) {
       setError(res.error);
       setLoading(false);
@@ -226,92 +240,28 @@ export function RepoDashboardPage(): React.JSX.Element {
     setLoading(false);
   }
 
-  async function onCreateAndSwitchBranch(): Promise<void> {
+  async function onPublishBranch(): Promise<void> {
     if (!repoInfo) return;
-    const parsed = parseBranchName(newBranchName);
-    if (!parsed.ok) {
-      setBranchError(parsed.error);
-      return;
-    }
-    setBranchError(null);
-    setPrError(null);
+    setError(null);
     setLoading(true);
-    const res = await repoService.createAndSwitchBranch(repoInfo.path, parsed.data);
+    const res = await repoService.publishFlow(repoInfo.path);
     if (!res.ok) {
-      setBranchError(res.error);
+      setError(res.error);
       setLoading(false);
       return;
     }
-    setRepoInfo(res.data);
-    setNewBranchName("");
-    await refreshBranches(repoInfo.path, res.data.branch);
+    setIsPublished(true);
     setLoading(false);
   }
 
-  async function onSwitchBranch(): Promise<void> {
+  async function onEnsurePr(): Promise<void> {
     if (!repoInfo) return;
-    const b = switchBranch.trim();
-    if (b.length === 0) return;
-    setBranchError(null);
-    setPrError(null);
-    setLoading(true);
-    const res = await repoService.switchToBranch(repoInfo.path, b);
-    if (!res.ok) {
-      setBranchError(res.error);
-      setLoading(false);
-      return;
-    }
-    setRepoInfo(res.data);
-    await refreshBranches(repoInfo.path, res.data.branch);
-    setLoading(false);
-  }
-
-  async function onPushBranch(): Promise<void> {
-    if (!repoInfo) return;
-    setPrError(null);
-    setLoading(true);
-    const res = await repoService.pushCurrentBranch(repoInfo.path);
-    if (!res.ok) {
-      setPrError(res.error);
-      setLoading(false);
-      return;
-    }
-    setPushedBranch(currentBranch);
-    setLoading(false);
-  }
-
-  async function onCreatePr(): Promise<void> {
-    if (!repoInfo) return;
-    const title = prTitle.trim();
-    if (title.length === 0) {
-      setPrError({ code: "INVALID_INPUT", message: "Please enter a PR title." });
-      return;
-    }
-
-    const baseRes = parseBaseBranchName(prBase);
-    if (!baseRes.ok) {
-      setPrError(baseRes.error);
-      return;
-    }
-
-    const headRes = parseBranchName(currentBranch);
-    if (!headRes.ok) {
-      setPrError(headRes.error);
-      return;
-    }
-
-    setPrError(null);
+    setError(null);
     setLoading(true);
     const body = prBody.trim().length > 0 ? prBody : undefined;
-    const res = await githubService.createPr({
-      repoPath: repoInfo.path,
-      base: baseRes.data,
-      head: headRes.data,
-      title,
-      ...(body ? { body } : {})
-    });
+    const res = await repoService.ensurePrFlow(repoInfo.path, prTitle, body);
     if (!res.ok) {
-      setPrError(res.error);
+      setError(res.error);
       setLoading(false);
       return;
     }
@@ -319,373 +269,292 @@ export function RepoDashboardPage(): React.JSX.Element {
     setLoading(false);
   }
 
-  async function onViewPr(): Promise<void> {
-    if (!repoInfo) return;
-    setPrError(null);
+  async function onMergeAndSync(): Promise<void> {
+    if (!repoInfo || !pullRequest) return;
+    setError(null);
     setLoading(true);
-    const res = await githubService.viewPrForCurrentBranch(repoInfo.path);
+    const res = await repoService.mergeAndSyncMainFlow(repoInfo.path, pullRequest.number);
     if (!res.ok) {
-      setPrError(res.error);
+      setError(res.error);
       setLoading(false);
       return;
     }
-    setPullRequest(res.data);
+    setRepoInfo(res.data);
+    setPullRequest({ ...pullRequest, state: "MERGED" });
     setLoading(false);
   }
-
-  const pushDisabled =
-    !repoInfo || loading || currentBranch.trim().length === 0 || currentBranch.trim() === "main";
-  const createDisabled =
-    !repoInfo ||
-    loading ||
-    currentBranch.trim().length === 0 ||
-    currentBranch.trim() === "main" ||
-    pushedBranch !== currentBranch ||
-    prTitle.trim().length === 0;
-  const viewDisabled = !repoInfo || loading;
 
   const createBranchDisabled = !repoInfo || loading || !parseBranchName(newBranchName).ok;
-  const switchBranchDisabled = !repoInfo || loading || switchBranch.trim().length === 0;
+  const trackUntrackedDisabled = !repoInfo || loading || !repoInfo.hasUntracked;
+  const stageSelectedDisabled = !repoInfo || loading || selectedStageableFiles.length === 0;
+  const stageAllDisabled = !repoInfo || loading || repoInfo.stageableCount === 0;
+  const commitDisabled = !repoInfo || loading || repoInfo.stagedCount === 0 || !parseCommitMessage(commitMessage).ok;
+  const publishDisabled = !repoInfo || loading || isOnMain;
+  const ensurePrDisabled = !repoInfo || loading || isOnMain || !isPublished;
+  const mergeDisabled = !repoInfo || loading || isOnMain || !isPublished || !pullRequest || pullRequest.state !== "OPEN";
 
   return (
-    <div style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ fontSize: 18, fontWeight: 800 }}>Repo Dashboard</div>
-          <div style={{ opacity: 0.75, marginTop: 2 }}>Week 1: open • verify • status • log</div>
+    <div className="mx-auto max-w-6xl p-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-1">
+          <div className="text-sm text-muted-foreground">Repo-Yopparai</div>
+          <div className="text-2xl font-semibold tracking-tight">Repo Dashboard</div>
+          {repoInfo ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <span>
+                Branch: <code className="rounded bg-muted px-1 py-0.5">{repoInfo.branch || "(unknown)"}</code>
+              </span>
+              <span>•</span>
+              <span>Staged: {repoInfo.stagedCount}</span>
+              <span>•</span>
+              <span>Stageable: {repoInfo.stageableCount}</span>
+              <span>•</span>
+              <span>Untracked: {repoInfo.hasUntracked ? "yes" : "no"}</span>
+              <span>•</span>
+              <StatusBadge label={repoInfo.isClean ? "Clean" : "Dirty"} variant={repoInfo.isClean ? "clean" : "dirty"} />
+              {workflowStep ? <Badge variant="secondary">{workflowStep}</Badge> : null}
+            </div>
+          ) : (
+            <div className="text-sm text-muted-foreground">Open a repository to start the guided workflow.</div>
+          )}
         </div>
-        <button
-          onClick={() => void onPickFolder()}
-          style={{
-            padding: "10px 12px",
-            borderRadius: 10,
-            border: "1px solid rgba(127,127,127,0.35)",
-            background: "transparent",
-            fontWeight: 700
-          }}
-        >
-          Open Repository
-        </button>
+
+        <div className="flex items-center gap-3">
+          {loading ? <div className="text-sm text-muted-foreground">Working…</div> : null}
+          <Button onClick={() => void onPickFolder()} variant="outline">
+            Open Repository
+          </Button>
+        </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", gap: 14, marginTop: 16 }}>
-        <div style={{ display: "grid", gap: 12 }}>
-          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 700 }}>Repository</div>
-              {loading ? <div style={{ opacity: 0.7 }}>Loading…</div> : null}
-            </div>
+      {error ? <ErrorBlock error={error} /> : null}
 
-            {error ? <ErrorBlock error={error} /> : null}
+      {repoPath ? (
+        <div className="mt-4 text-sm text-muted-foreground">
+          path: <code className="rounded bg-muted px-1 py-0.5">{repoPath}</code>
+        </div>
+      ) : null}
 
-            {repoPath ? (
-              <div style={{ marginTop: 10, opacity: 0.8, fontSize: 12 }}>
-                path: <code>{repoPath}</code>
+      <div className="mt-6 grid gap-6 lg:grid-cols-3">
+        <div className="space-y-6 lg:col-span-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Branch</CardTitle>
+              <CardDescription>Create and switch to a feature branch before publishing or opening a PR.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Input
+                  value={newBranchName}
+                  onChange={(e) => setNewBranchName(e.target.value)}
+                  placeholder="feature/my-change"
+                  disabled={!repoInfo || loading}
+                />
+                <Button onClick={() => void onCreateAndSwitchBranch()} disabled={createBranchDisabled}>
+                  Create &amp; Switch
+                </Button>
               </div>
-            ) : (
-              <div style={{ marginTop: 10, opacity: 0.75 }}>
-                Select a folder to verify it is a Git repository.
-              </div>
-            )}
-
-            {repoInfo ? (
-              <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
-                <div style={{ fontWeight: 700 }}>
-                  Branch: <code>{repoInfo.branch || "(detached/unknown)"}</code>
+              {repoInfo && isOnMain ? (
+                <div className="text-sm text-muted-foreground">
+                  You are on <code className="rounded bg-muted px-1 py-0.5">main</code>. Create a feature branch first.
                 </div>
-                {repoInfo.isClean ? (
-                  <StatusBadge label="Clean" variant="clean" />
-                ) : (
-                  <StatusBadge label="Dirty" variant="dirty" />
-                )}
-                <div style={{ opacity: 0.75, fontSize: 12 }}>
-                  staged: <code>{stagedCount}</code> • stageable: <code>{stageableCount}</code>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Track &amp; Stage</CardTitle>
+              <CardDescription>Track all untracked files, then stage selected changes.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={autoSelectUntracked}
+                    onChange={(e) => setAutoSelectUntracked(e.target.checked)}
+                    disabled={!repoInfo || loading}
+                  />
+                  Auto-select all untracked
+                </label>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="secondary" onClick={() => void onTrackUntracked()} disabled={trackUntrackedDisabled}>
+                    Track untracked
+                  </Button>
+                  <Button variant="outline" onClick={() => void onStageSelected()} disabled={stageSelectedDisabled}>
+                    Stage selected
+                  </Button>
+                  <Button variant="outline" onClick={() => void onStageAll()} disabled={stageAllDisabled}>
+                    Stage all
+                  </Button>
                 </div>
               </div>
-            ) : null}
-          </div>
 
-          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 700 }}>File changes</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  onClick={() => void onStageSelected()}
-                  disabled={!repoInfo || selectedStageableFiles.length === 0 || loading}
-                  style={buttonStyle(!repoInfo || selectedStageableFiles.length === 0 || loading)}
-                >
-                  Stage selected
-                </button>
-                <button
-                  onClick={() => void onStageAll()}
-                  disabled={!repoInfo || stageableCount === 0 || loading}
-                  style={buttonStyle(!repoInfo || stageableCount === 0 || loading)}
-                >
-                  Stage all
-                </button>
-              </div>
-            </div>
-            {repoInfo ? (
-              <div style={{ opacity: 0.75, fontSize: 12, marginTop: 6 }}>
-                selected: <code>{selectedPaths.size}</code> • selected stageable:{" "}
-                <code>{selectedStageableFiles.length}</code>
-              </div>
-            ) : null}
-            {repoInfo ? (
-              <div style={{ marginTop: 10 }}>
+              {repoInfo ? (
+                <div className="text-sm text-muted-foreground">
+                  selected: <code className="rounded bg-muted px-1 py-0.5">{selectedPaths.size}</code> • selected stageable:{" "}
+                  <code className="rounded bg-muted px-1 py-0.5">{selectedStageableFiles.length}</code>
+                </div>
+              ) : null}
+
+              <Separator />
+
+              {repoInfo ? (
                 <FileChangeList
                   changes={repoInfo.changes}
                   selectedPaths={selectedPaths}
                   onToggleSelected={toggleSelected}
                 />
-              </div>
-            ) : (
-              <div style={{ opacity: 0.75, marginTop: 10 }}>No repo loaded.</div>
-            )}
-          </div>
+              ) : (
+                <div className="text-sm text-muted-foreground">No repo loaded.</div>
+              )}
+            </CardContent>
+          </Card>
 
-          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 700 }}>Branch</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  onClick={() => void onCreateAndSwitchBranch()}
-                  disabled={createBranchDisabled}
-                  style={buttonStyle(createBranchDisabled)}
-                >
-                  Create &amp; Switch
-                </button>
-                <button
-                  onClick={() => void onSwitchBranch()}
-                  disabled={switchBranchDisabled}
-                  style={buttonStyle(switchBranchDisabled)}
-                >
-                  Switch
-                </button>
-              </div>
-            </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Commit</CardTitle>
+              <CardDescription>Commit is enabled when staged changes exist.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Input
+                value={commitMessage}
+                onChange={(e) => setCommitMessage(e.target.value)}
+                placeholder="Commit message"
+                disabled={!repoInfo || loading}
+              />
+              <Button onClick={() => void onCommit()} disabled={commitDisabled}>
+                Commit
+              </Button>
+            </CardContent>
+          </Card>
 
-            {branchError ? <ErrorBlock error={branchError} /> : null}
-
-            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 240px", gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>New branch name</div>
-                <input
-                  type="text"
-                  value={newBranchName}
-                  onChange={(e) => setNewBranchName(e.target.value)}
-                  placeholder="feature/my-change"
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(127,127,127,0.35)",
-                    background: "transparent"
-                  }}
-                  disabled={!repoInfo || loading}
-                />
+          <Card>
+            <CardHeader>
+              <CardTitle>Publish &amp; PR</CardTitle>
+              <CardDescription>Publish the branch, then create or view the PR for the current branch.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Button onClick={() => void onPublishBranch()} disabled={publishDisabled}>
+                  Publish branch
+                </Button>
+                <div className="text-sm text-muted-foreground">
+                  published:{" "}
+                  <code className="rounded bg-muted px-1 py-0.5">
+                    {repoInfo && !isOnMain && isPublished ? "yes" : "no"}
+                  </code>
+                </div>
+                {repoInfo && isOnMain ? (
+                  <div className="text-sm text-muted-foreground">Create a feature branch first.</div>
+                ) : null}
               </div>
 
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Switch branch</div>
-                <select
-                  value={switchBranch}
-                  onChange={(e) => setSwitchBranch(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(127,127,127,0.35)",
-                    background: "transparent"
-                  }}
-                  disabled={!repoInfo || loading || branches.length === 0}
-                >
-                  {branches.length === 0 ? <option value="">(no branches)</option> : null}
-                  {branches.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 700 }}>Pull Request</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  onClick={() => void onPushBranch()}
-                  disabled={pushDisabled}
-                  style={buttonStyle(pushDisabled)}
-                  title={currentBranch.trim() === "main" ? "Push from a feature branch (not main)." : undefined}
-                >
-                  Push branch
-                </button>
-                <button
-                  onClick={() => void onCreatePr()}
-                  disabled={createDisabled}
-                  style={buttonStyle(createDisabled)}
-                  title={pushedBranch !== currentBranch ? "Push branch before creating PR." : undefined}
-                >
-                  Create PR
-                </button>
-                <button onClick={() => void onViewPr()} disabled={viewDisabled} style={buttonStyle(viewDisabled)}>
-                  View PR
-                </button>
-              </div>
-            </div>
-
-            {prError ? <ErrorBlock error={prError} /> : null}
-
-            {currentBranch.trim() === "main" ? (
-              <div style={{ marginTop: 8, opacity: 0.75, fontSize: 12 }}>
-                Create a feature branch to open a PR.
-              </div>
-            ) : null}
-
-            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 180px", gap: 10 }}>
-              <div style={{ display: "grid", gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>PR Title (required)</div>
-                  <input
-                    type="text"
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">PR title</div>
+                  <Input
                     value={prTitle}
                     onChange={(e) => setPrTitle(e.target.value)}
-                    placeholder="Add a descriptive title"
-                    style={{
-                      width: "100%",
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(127,127,127,0.35)",
-                      background: "transparent"
-                    }}
-                    disabled={!repoInfo || loading}
+                    placeholder="Short, descriptive title"
+                    disabled={!repoInfo || loading || isOnMain}
                   />
                 </div>
-
-                <div>
-                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>PR Body (optional)</div>
-                  <textarea
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">PR body (optional)</div>
+                  <Textarea
                     value={prBody}
                     onChange={(e) => setPrBody(e.target.value)}
                     placeholder="Describe what this PR does"
-                    style={{
-                      width: "100%",
-                      minHeight: 90,
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(127,127,127,0.35)",
-                      background: "transparent",
-                      resize: "vertical"
-                    }}
-                    disabled={!repoInfo || loading}
+                    disabled={!repoInfo || loading || isOnMain}
                   />
                 </div>
               </div>
 
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Base branch</div>
-                <select
-                  value={prBase}
-                  onChange={(e) => setPrBase(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(127,127,127,0.35)",
-                    background: "transparent"
-                  }}
-                  disabled={!repoInfo || loading}
-                >
-                  <option value="main">main</option>
-                </select>
-
-                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                  head: <code>{currentBranch.trim() || "(detached/unknown)"}</code>
-                </div>
-
-                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-                  pushed:{" "}
-                  <code>{pushedBranch === currentBranch && currentBranch.trim().length > 0 ? "yes" : "no"}</code>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <Button variant="secondary" onClick={() => void onEnsurePr()} disabled={ensurePrDisabled}>
+                  Create / View PR
+                </Button>
+                <div className="text-sm text-muted-foreground">
+                  Enabled when branch is published and not{" "}
+                  <code className="rounded bg-muted px-1 py-0.5">main</code>.
                 </div>
               </div>
-            </div>
 
-            {pullRequest ? (
-              <div
-                style={{
-                  marginTop: 12,
-                  border: "1px solid rgba(127,127,127,0.22)",
-                  borderRadius: 10,
-                  padding: 12
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <div style={{ fontWeight: 800 }}>
-                    #{pullRequest.number} {pullRequest.title}
+              {pullRequest ? (
+                <div className="rounded-md border p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="font-semibold">
+                      #{pullRequest.number} {pullRequest.title}
+                    </div>
+                    <StatusBadge
+                      label={pullRequest.state}
+                      variant={
+                        pullRequest.state === "OPEN"
+                          ? "clean"
+                          : pullRequest.state === "MERGED"
+                            ? "staged"
+                            : "dirty"
+                      }
+                    />
+                    {pullRequest.isDraft ? <StatusBadge label="DRAFT" variant="modified" /> : null}
                   </div>
-                  <StatusBadge
-                    label={pullRequest.state}
-                    variant={
-                      pullRequest.state === "OPEN"
-                        ? "clean"
-                        : pullRequest.state === "MERGED"
-                          ? "staged"
-                          : "dirty"
-                    }
-                  />
-                  {pullRequest.isDraft ? <StatusBadge label="DRAFT" variant="modified" /> : null}
+                  <div className="mt-2 text-sm">
+                    <a className="text-primary underline underline-offset-4" href={pullRequest.url} target="_blank" rel="noreferrer">
+                      {pullRequest.url}
+                    </a>
+                  </div>
+                  <div className="mt-2 text-sm text-muted-foreground">
+                    base: <code className="rounded bg-muted px-1 py-0.5">{pullRequest.baseRefName}</code> • head:{" "}
+                    <code className="rounded bg-muted px-1 py-0.5">{pullRequest.headRefName}</code>
+                  </div>
                 </div>
-                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
-                  <a href={pullRequest.url} target="_blank" rel="noreferrer">
-                    {pullRequest.url}
-                  </a>
-                </div>
-                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-                  base: <code>{pullRequest.baseRefName}</code> • head: <code>{pullRequest.headRefName}</code>
-                </div>
-              </div>
-            ) : null}
-          </div>
+              ) : null}
+            </CardContent>
+          </Card>
 
-          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
-            <div style={{ fontWeight: 700, marginBottom: 10 }}>Commit</div>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <input
-                type="text"
-                value={commitMessage}
-                placeholder="Commit message"
-                onChange={(e) => setCommitMessage(e.target.value)}
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(127,127,127,0.35)",
-                  background: "transparent"
-                }}
-                disabled={!repoInfo || loading}
-              />
-              <button
-                onClick={() => void onCommit()}
-                disabled={!repoInfo || loading || stagedCount === 0 || !parseCommitMessage(commitMessage).ok}
-                style={buttonStyle(
-                  !repoInfo || loading || stagedCount === 0 || !parseCommitMessage(commitMessage).ok
-                )}
-              >
-                Commit
-              </button>
-            </div>
-            {repoInfo ? (
-              <div style={{ opacity: 0.75, fontSize: 12, marginTop: 8 }}>
-                Commit enabled when message is non-empty and staged &gt; 0.
+          <Card>
+            <CardHeader>
+              <CardTitle>Merge &amp; Sync</CardTitle>
+              <CardDescription>Squash merge the PR, delete the branch, switch to main, and pull latest.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Button onClick={() => void onMergeAndSync()} disabled={mergeDisabled}>
+                Merge PR + Sync main
+              </Button>
+              <div className="text-sm text-muted-foreground">
+                Enabled when PR is open, branch is published, and branch is not{" "}
+                <code className="rounded bg-muted px-1 py-0.5">main</code>.
               </div>
-            ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </div>
 
-        <CommandLogPanel />
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Command Log</CardTitle>
+              <CardDescription>Recent command executions (read-only).</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Collapsible open={logOpen} onOpenChange={setLogOpen}>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-muted-foreground">Shows latest entries. Expand for stdout/stderr.</div>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="outline" size="sm">
+                      {logOpen ? "Hide" : "Show"}
+                    </Button>
+                  </CollapsibleTrigger>
+                </div>
+                <CollapsibleContent className="mt-4">
+                  <CommandLogPanel />
+                </CollapsibleContent>
+              </Collapsible>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   );

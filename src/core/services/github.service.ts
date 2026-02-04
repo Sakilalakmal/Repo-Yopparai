@@ -9,17 +9,6 @@ function cwdOf(path: RepoPath): string {
   return path as string;
 }
 
-function isGhJsonFlagUnsupported(stdout: string, stderr: string): boolean {
-  const text = `${stdout}\n${stderr}`.toLowerCase();
-  if (!text.includes("--json")) return false;
-  return (
-    text.includes("unknown flag") ||
-    text.includes("unknown shorthand flag") ||
-    text.includes("unknown option") ||
-    text.includes("flag provided but not defined")
-  );
-}
-
 function isPrNotFound(stdout: string, stderr: string): boolean {
   const text = `${stdout}\n${stderr}`.toLowerCase();
   return (
@@ -93,8 +82,7 @@ export class GitHubService {
     if (!authed.ok) return authed;
 
     const body = params.body ?? "";
-    const jsonFields = "number,title,url,state,baseRefName,headRefName,isDraft";
-    const argsWithJson = [
+    const args = [
       "pr",
       "create",
       "--base",
@@ -106,75 +94,27 @@ export class GitHubService {
       "--body",
       body
     ];
-    if (params.draft) argsWithJson.push("--draft");
-    argsWithJson.push("--json", jsonFields);
+    if (params.draft) args.push("--draft");
 
     const res = await commandRunner.run({
       name: "ghPrCreate",
       cwd: cwdOf(params.repoPath),
       program: "gh",
-      args: argsWithJson,
+      args,
       timeoutMs: 60_000
     });
     if (!res.ok) return res;
     if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
-
-    if (res.data.exitCode === 0) {
-      const parsed = parseGhPrJson(res.data.stdout);
-      if (!parsed.ok) {
-        return err(parsed.error.code, parsed.error.message, {
-          stdout: res.data.stdout,
-          stderr: res.data.stderr,
-          command: commandToString("ghPrCreate", "gh", argsWithJson)
-        });
-      }
-      return parsed;
-    }
-
-    if (!isGhJsonFlagUnsupported(res.data.stdout, res.data.stderr)) {
+    if (res.data.exitCode !== 0) {
       return err("CMD_FAILED", "Failed to create pull request.", {
         exitCode: res.data.exitCode,
         stdout: res.data.stdout,
         stderr: res.data.stderr,
-        command: commandToString("ghPrCreate", "gh", argsWithJson)
+        command: commandToString("ghPrCreate", "gh", args)
       });
     }
 
-    const argsFallback = [
-      "pr",
-      "create",
-      "--base",
-      params.base as string,
-      "--head",
-      params.head as string,
-      "--title",
-      params.title,
-      "--body",
-      body
-    ];
-    if (params.draft) argsFallback.push("--draft");
-
-    const created = await commandRunner.run({
-      name: "ghPrCreateFallback",
-      cwd: cwdOf(params.repoPath),
-      program: "gh",
-      args: argsFallback,
-      timeoutMs: 60_000
-    });
-    if (!created.ok) return created;
-    if (isTimeoutResponse(created.data)) return err("TIMEOUT", "Command timed out.");
-    if (created.data.exitCode !== 0) {
-      return err("CMD_FAILED", "Failed to create pull request.", {
-        exitCode: created.data.exitCode,
-        stdout: created.data.stdout,
-        stderr: created.data.stderr,
-        command: commandToString("ghPrCreateFallback", "gh", argsFallback)
-      });
-    }
-
-    const viewed = await this.viewPrForCurrentBranch(params.repoPath);
-    if (!viewed.ok) return viewed;
-    return viewed;
+    return this.viewPrForCurrentBranch(params.repoPath);
   }
 
   async viewPrForCurrentBranch(repoPath: RepoPath): Promise<Result<PullRequest>> {
@@ -220,6 +160,33 @@ export class GitHubService {
       });
     }
     return parsed;
+  }
+
+  async mergePrSquashDeleteBranch(repoPath: RepoPath, prNumber: number): Promise<Result<void>> {
+    const installed = await this.ensureGhInstalled(repoPath);
+    if (!installed.ok) return installed;
+    const authed = await this.ensureGhAuthed(repoPath);
+    if (!authed.ok) return authed;
+
+    const args = ["pr", "merge", String(prNumber), "--squash", "--delete-branch"];
+    const res = await commandRunner.run({
+      name: "ghPrMergeSquash",
+      cwd: cwdOf(repoPath),
+      program: "gh",
+      args,
+      timeoutMs: 120_000
+    });
+    if (!res.ok) return res;
+    if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
+    if (res.data.exitCode !== 0) {
+      return err("CMD_FAILED", "Failed to merge pull request.", {
+        exitCode: res.data.exitCode,
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString("ghPrMergeSquash", "gh", args)
+      });
+    }
+    return ok(undefined);
   }
 }
 

@@ -12,6 +12,16 @@ function isOkTrue(stdout: string): boolean {
 }
 
 export class GitService {
+  private async ensureNoStagedChanges(path: RepoPath): Promise<Result<void>> {
+    const statusRes = await this.getStatus(path);
+    if (!statusRes.ok) return statusRes;
+    const hasStaged = statusRes.data.some((c) => c.isStaged);
+    if (hasStaged) {
+      return err("DIRTY_SWITCH_BLOCKED", "You have staged changes. Commit or unstage before switching branches.");
+    }
+    return ok(undefined);
+  }
+
   private async runGitVoid(
     path: RepoPath,
     name: string,
@@ -123,19 +133,39 @@ export class GitService {
   }
 
   async commit(path: RepoPath, message: CommitMessage): Promise<Result<void>> {
-    return this.runGitVoid(path, "commit", ["commit", "-m", message as string], 60_000);
+    const msg = (message as string).trim();
+    if (msg.length === 0) return err("INVALID_INPUT", "Please enter a commit message.");
+
+    const statusRes = await this.getStatus(path);
+    if (!statusRes.ok) return statusRes;
+    const hasStaged = statusRes.data.some((c) => c.isStaged);
+    if (!hasStaged) return err("INVALID_INPUT", "Nothing staged to commit.");
+
+    return this.runGitVoid(path, "commit", ["commit", "-m", msg], 60_000);
   }
 
   async createAndCheckoutBranch(path: RepoPath, branch: BranchName): Promise<Result<void>> {
     const b = (branch as string).trim();
     if (b.length === 0) return err("INVALID_INPUT", "Invalid branch name.");
+    const clean = await this.ensureNoStagedChanges(path);
+    if (!clean.ok) return clean;
     return this.runGitVoid(path, "createAndCheckoutBranch", ["checkout", "-b", b], 30_000);
   }
 
   async checkoutBranch(path: RepoPath, branch: BranchName | "main"): Promise<Result<void>> {
     const b = typeof branch === "string" ? branch.trim() : (branch as string).trim();
     if (b.length === 0) return err("INVALID_INPUT", "Invalid branch name.");
+    const clean = await this.ensureNoStagedChanges(path);
+    if (!clean.ok) return clean;
     return this.runGitVoid(path, "checkoutBranch", ["checkout", b], 30_000);
+  }
+
+  async checkoutMain(path: RepoPath): Promise<Result<void>> {
+    return this.checkoutBranch(path, "main");
+  }
+
+  async pullMain(path: RepoPath): Promise<Result<void>> {
+    return this.runGitVoid(path, "pullMain", ["pull"], 120_000);
   }
 
   async listBranches(path: RepoPath): Promise<Result<string[]>> {

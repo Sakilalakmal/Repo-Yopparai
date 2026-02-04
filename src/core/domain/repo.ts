@@ -16,13 +16,16 @@ export type FileChange = {
   indexStatus: GitStatusChar;
   worktreeStatus: GitStatusChar;
   isStaged: boolean;
-  canStage: boolean;
+  stageable: boolean;
 };
 
 export type RepoInfo = {
   path: RepoPath;
   branch: string;
   isClean: boolean;
+  stagedCount: number;
+  stageableCount: number;
+  hasUntracked: boolean;
   changes: FileChange[];
 };
 
