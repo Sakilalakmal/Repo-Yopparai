@@ -1,4 +1,4 @@
-import type { RepoPath } from "../domain/repo";
+import type { CommitMessage, RepoPath } from "../domain/repo";
 import type { RunCommandResponse } from "../shell/command.types";
 import { err, ok, type Result } from "../shell/command.errors";
 
@@ -18,6 +18,12 @@ export function toRepoPath(input: string): Result<RepoPath> {
   const trimmed = input.trim();
   if (trimmed.length === 0) return err("INVALID_PATH", "Please select a valid folder path.");
   return ok(trimmed as RepoPath);
+}
+
+export function parseCommitMessage(input: string): Result<CommitMessage> {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return err("INVALID_INPUT", "Please enter a commit message.");
+  return ok(trimmed as CommitMessage);
 }
 
 export function isRunCommandResponse(value: unknown): value is RunCommandResponse {
