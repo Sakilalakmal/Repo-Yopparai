@@ -1,5 +1,7 @@
 export type RepoPath = string & { readonly __brand: "RepoPath" };
 
+export type CommitMessage = string & { readonly __brand: "CommitMessage" };
+
 export type GitStatusChar = "M" | "A" | "D" | "R" | "C" | "U" | "?" | " ";
 
 export type FileChangeKind = "tracked" | "untracked";
@@ -9,6 +11,8 @@ export type FileChange = {
   kind: FileChangeKind;
   indexStatus: GitStatusChar;
   worktreeStatus: GitStatusChar;
+  isStaged: boolean;
+  canStage: boolean;
 };
 
 export type RepoInfo = {

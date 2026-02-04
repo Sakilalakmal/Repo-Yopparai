@@ -1,4 +1,4 @@
-import type { FileChange, RepoPath } from "../domain/repo";
+import type { CommitMessage, FileChange, RepoPath } from "../domain/repo";
 import { parseGitStatusPorcelainV1 } from "../parsers/gitStatus.parser";
 import { commandRunner } from "../shell/commandRunner";
 import { commandToString, err, isTimeoutResponse, ok, type Result } from "../shell/command.errors";
@@ -12,6 +12,32 @@ function isOkTrue(stdout: string): boolean {
 }
 
 export class GitService {
+  private async runGitVoid(
+    path: RepoPath,
+    name: string,
+    args: string[],
+    timeoutMs: number
+  ): Promise<Result<void>> {
+    const res = await commandRunner.run({
+      name,
+      cwd: cwdOf(path),
+      program: "git",
+      args,
+      timeoutMs
+    });
+    if (!res.ok) return res;
+    if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
+    if (res.data.exitCode !== 0) {
+      return err("CMD_FAILED", "Git command failed.", {
+        exitCode: res.data.exitCode,
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString(name, "git", args)
+      });
+    }
+    return ok(undefined);
+  }
+
   async verifyRepo(path: RepoPath): Promise<Result<true>> {
     const res = await commandRunner.run({
       name: "verifyRepo",
@@ -74,6 +100,30 @@ export class GitService {
     }
     const changes = parseGitStatusPorcelainV1(res.data.stdout);
     return ok(changes);
+  }
+
+  async stageAll(path: RepoPath): Promise<Result<void>> {
+    return this.runGitVoid(path, "stageAll", ["add", "."], 30_000);
+  }
+
+  async stageFiles(path: RepoPath, files: string[]): Promise<Result<void>> {
+    if (files.length === 0) return err("INVALID_INPUT", "No files selected to stage.");
+    const args = ["add", "--", ...files];
+    return this.runGitVoid(path, "stageFiles", args, 30_000);
+  }
+
+  async unstageAll(path: RepoPath): Promise<Result<void>> {
+    return this.runGitVoid(path, "unstageAll", ["reset"], 30_000);
+  }
+
+  async unstageFiles(path: RepoPath, files: string[]): Promise<Result<void>> {
+    if (files.length === 0) return err("INVALID_INPUT", "No files selected to unstage.");
+    const args = ["reset", "--", ...files];
+    return this.runGitVoid(path, "unstageFiles", args, 30_000);
+  }
+
+  async commit(path: RepoPath, message: CommitMessage): Promise<Result<void>> {
+    return this.runGitVoid(path, "commit", ["commit", "-m", message as string], 60_000);
   }
 }
 

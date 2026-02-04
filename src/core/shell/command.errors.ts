@@ -5,6 +5,7 @@ export type AppErrorCode =
   | "CMD_FAILED"
   | "TIMEOUT"
   | "INVALID_PATH"
+  | "INVALID_INPUT"
   | "TAURI_ERROR";
 
 export type AppErrorDetails = {
