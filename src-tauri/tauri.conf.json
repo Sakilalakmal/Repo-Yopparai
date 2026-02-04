@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "productName": "Repo-Yopparai",
+  "version": "0.1.0",
+  "identifier": "com.repo-yopparai.app",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Repo-Yopparai",
+        "width": 1100,
+        "height": 750,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
