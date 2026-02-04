@@ -1,9 +1,11 @@
 import React from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { RepoInfo, RepoPath } from "../../../core/domain/repo";
+import type { PullRequest } from "../../../core/domain/pr";
 import type { AppError } from "../../../core/shell/command.errors";
+import { githubService } from "../../../core/services/github.service";
 import { repoService } from "../../../core/services/repo.service";
-import { parseCommitMessage, toRepoPath } from "../../../core/utils/guard";
+import { parseBaseBranchName, parseBranchName, parseCommitMessage, toRepoPath } from "../../../core/utils/guard";
 import { CommandLogPanel } from "../../components/CommandLogPanel/CommandLogPanel";
 import { FileChangeList } from "../../components/FileChangeList/FileChangeList";
 import { StatusBadge } from "../../components/StatusBadge/StatusBadge";
@@ -19,16 +21,56 @@ function buttonStyle(disabled: boolean): React.CSSProperties {
   };
 }
 
+function ErrorBlock(props: { error: AppError }): React.JSX.Element {
+  const detailsText = props.error.details ? JSON.stringify(props.error.details, null, 2) : null;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <StatusBadge label={props.error.code} variant="error" />
+      <div style={{ marginTop: 8, fontWeight: 650 }}>{props.error.message}</div>
+      {props.error.code === "GH_NOT_AUTHED" ? (
+        <div style={{ marginTop: 6, opacity: 0.85 }}>
+          Run: <code>gh auth login</code>
+        </div>
+      ) : null}
+      {detailsText ? (
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", opacity: 0.85 }}>Details</summary>
+          <pre
+            style={{
+              marginTop: 8,
+              padding: 10,
+              borderRadius: 8,
+              border: "1px solid rgba(127,127,127,0.25)",
+              background: "rgba(0,0,0,0.15)",
+              overflow: "auto",
+              maxHeight: 240
+            }}
+          >
+            {detailsText}
+          </pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 export function RepoDashboardPage(): React.JSX.Element {
   const [repoPath, setRepoPath] = React.useState<RepoPath | null>(null);
   const [repoInfo, setRepoInfo] = React.useState<RepoInfo | null>(null);
   const [error, setError] = React.useState<AppError | null>(null);
+  const [prError, setPrError] = React.useState<AppError | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [selectedPaths, setSelectedPaths] = React.useState<ReadonlySet<string>>(() => new Set());
   const [commitMessage, setCommitMessage] = React.useState("");
+  const [pushedBranch, setPushedBranch] = React.useState<string | null>(null);
+  const [prTitle, setPrTitle] = React.useState("");
+  const [prBody, setPrBody] = React.useState("");
+  const [prBase, setPrBase] = React.useState("main");
+  const [pullRequest, setPullRequest] = React.useState<PullRequest | null>(null);
 
   const stageableCount = repoInfo ? repoInfo.changes.filter((c) => c.canStage).length : 0;
   const stagedCount = repoInfo ? repoInfo.changes.filter((c) => c.isStaged).length : 0;
+  const currentBranch = repoInfo?.branch ?? "";
 
   const selectedStageableFiles = React.useMemo(() => {
     if (!repoInfo) return [];
@@ -45,12 +87,24 @@ export function RepoDashboardPage(): React.JSX.Element {
     });
   }
 
+  React.useEffect(() => {
+    if (!repoInfo) return;
+    if (pushedBranch === null) return;
+    if (repoInfo.branch !== pushedBranch) setPushedBranch(null);
+  }, [repoInfo, pushedBranch]);
+
   async function onPickFolder(): Promise<void> {
     setError(null);
+    setPrError(null);
     setLoading(true);
     setRepoInfo(null);
     setSelectedPaths(new Set());
     setCommitMessage("");
+    setPushedBranch(null);
+    setPullRequest(null);
+    setPrTitle("");
+    setPrBody("");
+    setPrBase("main");
 
     try {
       const selected = await open({
@@ -92,6 +146,7 @@ export function RepoDashboardPage(): React.JSX.Element {
   async function onStageAll(): Promise<void> {
     if (!repoInfo) return;
     setError(null);
+    setPrError(null);
     setLoading(true);
     const res = await repoService.stageAll(repoInfo.path);
     if (!res.ok) {
@@ -107,6 +162,7 @@ export function RepoDashboardPage(): React.JSX.Element {
   async function onStageSelected(): Promise<void> {
     if (!repoInfo) return;
     setError(null);
+    setPrError(null);
     setLoading(true);
     const res = await repoService.stageFiles(repoInfo.path, selectedStageableFiles);
     if (!res.ok) {
@@ -127,6 +183,7 @@ export function RepoDashboardPage(): React.JSX.Element {
       return;
     }
     setError(null);
+    setPrError(null);
     setLoading(true);
     const res = await repoService.commit(repoInfo.path, msg.data);
     if (!res.ok) {
@@ -139,6 +196,84 @@ export function RepoDashboardPage(): React.JSX.Element {
     setSelectedPaths(new Set());
     setLoading(false);
   }
+
+  async function onPushBranch(): Promise<void> {
+    if (!repoInfo) return;
+    setPrError(null);
+    setLoading(true);
+    const res = await repoService.pushCurrentBranch(repoInfo.path);
+    if (!res.ok) {
+      setPrError(res.error);
+      setLoading(false);
+      return;
+    }
+    setPushedBranch(currentBranch);
+    setLoading(false);
+  }
+
+  async function onCreatePr(): Promise<void> {
+    if (!repoInfo) return;
+    const title = prTitle.trim();
+    if (title.length === 0) {
+      setPrError({ code: "INVALID_INPUT", message: "Please enter a PR title." });
+      return;
+    }
+
+    const baseRes = parseBaseBranchName(prBase);
+    if (!baseRes.ok) {
+      setPrError(baseRes.error);
+      return;
+    }
+
+    const headRes = parseBranchName(currentBranch);
+    if (!headRes.ok) {
+      setPrError(headRes.error);
+      return;
+    }
+
+    setPrError(null);
+    setLoading(true);
+    const body = prBody.trim().length > 0 ? prBody : undefined;
+    const res = await githubService.createPr({
+      repoPath: repoInfo.path,
+      base: baseRes.data,
+      head: headRes.data,
+      title,
+      ...(body ? { body } : {})
+    });
+    if (!res.ok) {
+      setPrError(res.error);
+      setLoading(false);
+      return;
+    }
+    setPullRequest(res.data);
+    setLoading(false);
+  }
+
+  async function onViewPr(): Promise<void> {
+    if (!repoInfo) return;
+    setPrError(null);
+    setLoading(true);
+    const res = await githubService.viewPrForCurrentBranch(repoInfo.path);
+    if (!res.ok) {
+      setPrError(res.error);
+      setLoading(false);
+      return;
+    }
+    setPullRequest(res.data);
+    setLoading(false);
+  }
+
+  const pushDisabled =
+    !repoInfo || loading || currentBranch.trim().length === 0 || currentBranch.trim() === "main";
+  const createDisabled =
+    !repoInfo ||
+    loading ||
+    currentBranch.trim().length === 0 ||
+    currentBranch.trim() === "main" ||
+    pushedBranch !== currentBranch ||
+    prTitle.trim().length === 0;
+  const viewDisabled = !repoInfo || loading;
 
   return (
     <div style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
@@ -169,12 +304,7 @@ export function RepoDashboardPage(): React.JSX.Element {
               {loading ? <div style={{ opacity: 0.7 }}>Loading…</div> : null}
             </div>
 
-            {error ? (
-              <div style={{ marginTop: 10 }}>
-                <StatusBadge label={error.code} variant="error" />
-                <div style={{ marginTop: 8, fontWeight: 650 }}>{error.message}</div>
-              </div>
-            ) : null}
+            {error ? <ErrorBlock error={error} /> : null}
 
             {repoPath ? (
               <div style={{ marginTop: 10, opacity: 0.8, fontSize: 12 }}>
@@ -240,6 +370,139 @@ export function RepoDashboardPage(): React.JSX.Element {
             ) : (
               <div style={{ opacity: 0.75, marginTop: 10 }}>No repo loaded.</div>
             )}
+          </div>
+
+          <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontWeight: 700 }}>Pull Request</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => void onPushBranch()}
+                  disabled={pushDisabled}
+                  style={buttonStyle(pushDisabled)}
+                  title={currentBranch.trim() === "main" ? "Push from a feature branch (not main)." : undefined}
+                >
+                  Push branch
+                </button>
+                <button
+                  onClick={() => void onCreatePr()}
+                  disabled={createDisabled}
+                  style={buttonStyle(createDisabled)}
+                  title={pushedBranch !== currentBranch ? "Push branch before creating PR." : undefined}
+                >
+                  Create PR
+                </button>
+                <button onClick={() => void onViewPr()} disabled={viewDisabled} style={buttonStyle(viewDisabled)}>
+                  View PR
+                </button>
+              </div>
+            </div>
+
+            {prError ? <ErrorBlock error={prError} /> : null}
+
+            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 180px", gap: 10 }}>
+              <div style={{ display: "grid", gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>PR Title (required)</div>
+                  <input
+                    type="text"
+                    value={prTitle}
+                    onChange={(e) => setPrTitle(e.target.value)}
+                    placeholder="Add a descriptive title"
+                    style={{
+                      width: "100%",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(127,127,127,0.35)",
+                      background: "transparent"
+                    }}
+                    disabled={!repoInfo || loading}
+                  />
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>PR Body (optional)</div>
+                  <textarea
+                    value={prBody}
+                    onChange={(e) => setPrBody(e.target.value)}
+                    placeholder="Describe what this PR does"
+                    style={{
+                      width: "100%",
+                      minHeight: 90,
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(127,127,127,0.35)",
+                      background: "transparent",
+                      resize: "vertical"
+                    }}
+                    disabled={!repoInfo || loading}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Base branch</div>
+                <select
+                  value={prBase}
+                  onChange={(e) => setPrBase(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(127,127,127,0.35)",
+                    background: "transparent"
+                  }}
+                  disabled={!repoInfo || loading}
+                >
+                  <option value="main">main</option>
+                </select>
+
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                  head: <code>{currentBranch.trim() || "(detached/unknown)"}</code>
+                </div>
+
+                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+                  pushed:{" "}
+                  <code>{pushedBranch === currentBranch && currentBranch.trim().length > 0 ? "yes" : "no"}</code>
+                </div>
+              </div>
+            </div>
+
+            {pullRequest ? (
+              <div
+                style={{
+                  marginTop: 12,
+                  border: "1px solid rgba(127,127,127,0.22)",
+                  borderRadius: 10,
+                  padding: 12
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontWeight: 800 }}>
+                    #{pullRequest.number} {pullRequest.title}
+                  </div>
+                  <StatusBadge
+                    label={pullRequest.state}
+                    variant={
+                      pullRequest.state === "OPEN"
+                        ? "clean"
+                        : pullRequest.state === "MERGED"
+                          ? "staged"
+                          : "dirty"
+                    }
+                  />
+                  {pullRequest.isDraft ? <StatusBadge label="DRAFT" variant="modified" /> : null}
+                </div>
+                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
+                  <a href={pullRequest.url} target="_blank" rel="noreferrer">
+                    {pullRequest.url}
+                  </a>
+                </div>
+                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+                  base: <code>{pullRequest.baseRefName}</code> • head: <code>{pullRequest.headRefName}</code>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 10, padding: 12 }}>
