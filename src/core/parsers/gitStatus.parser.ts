@@ -36,7 +36,7 @@ export function parseGitStatusPorcelainV1(stdout: string): FileChange[] {
         indexStatus: "?",
         worktreeStatus: "?",
         isStaged: false,
-        canStage: true
+        stageable: true
       });
       continue;
     }
@@ -46,14 +46,14 @@ export function parseGitStatusPorcelainV1(stdout: string): FileChange[] {
     const worktreeStatus = toStatusChar(line[1] ?? " ");
     const path = extractPath(line.slice(3));
     const isStaged = indexStatus !== " ";
-    const canStage = worktreeStatus !== " ";
+    const stageable = worktreeStatus !== " ";
     changes.push({
       path,
       kind: "tracked",
       indexStatus,
       worktreeStatus,
       isStaged,
-      canStage
+      stageable
     });
   }
 

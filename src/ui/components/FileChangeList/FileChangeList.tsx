@@ -12,44 +12,35 @@ export function FileChangeList(props: {
   onToggleSelected: (path: string) => void;
 }): React.JSX.Element {
   if (props.changes.length === 0) {
-    return <div style={{ opacity: 0.8 }}>No changes detected.</div>;
+    return <div className="text-sm text-muted-foreground">No changes detected.</div>;
   }
 
   return (
-    <div style={{ display: "grid", gap: 8 }}>
+    <div className="space-y-2">
       {props.changes.map((c) => (
         <div
           key={`${c.kind}:${c.path}`}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "auto 1fr auto",
-            gap: 12,
-            alignItems: "center",
-            padding: "8px 10px",
-            border: "1px solid rgba(127,127,127,0.3)",
-            borderRadius: 8
-          }}
+          className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-md border p-3"
         >
           <input
             type="checkbox"
             checked={props.selectedPaths.has(c.path)}
-            disabled={!c.canStage}
+            disabled={!c.stageable}
             onChange={() => props.onToggleSelected(c.path)}
             aria-label={`Select ${c.path}`}
           />
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
-              {c.path}
-            </div>
+          <div className="min-w-0">
+            <div className="truncate font-medium">{c.path}</div>
             {c.kind === "tracked" ? (
-              <div style={{ opacity: 0.75, fontSize: 12 }}>
-                index: <code>{c.indexStatus}</code> • worktree: <code>{c.worktreeStatus}</code>
+              <div className="mt-1 text-xs text-muted-foreground">
+                index: <code className="rounded bg-muted px-1 py-0.5">{c.indexStatus}</code> • worktree:{" "}
+                <code className="rounded bg-muted px-1 py-0.5">{c.worktreeStatus}</code>
               </div>
             ) : (
-              <div style={{ opacity: 0.75, fontSize: 12 }}>untracked</div>
+              <div className="mt-1 text-xs text-muted-foreground">untracked</div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <div className="flex flex-wrap justify-end gap-2">
             {c.kind === "untracked" ? <StatusBadge label="Untracked" variant="untracked" /> : null}
             {c.isStaged ? <StatusBadge label="Staged" variant="staged" /> : null}
             {isModified(c) ? <StatusBadge label="Modified" variant="modified" /> : null}
