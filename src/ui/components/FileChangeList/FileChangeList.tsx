@@ -2,15 +2,15 @@ import React from "react";
 import type { FileChange } from "../../../core/domain/repo";
 import { StatusBadge } from "../StatusBadge/StatusBadge";
 
-function isStaged(change: FileChange): boolean {
-  return change.kind === "tracked" && change.indexStatus !== " ";
-}
-
 function isModified(change: FileChange): boolean {
   return change.kind === "tracked" && change.worktreeStatus !== " ";
 }
 
-export function FileChangeList(props: { changes: readonly FileChange[] }): React.JSX.Element {
+export function FileChangeList(props: {
+  changes: readonly FileChange[];
+  selectedPaths: ReadonlySet<string>;
+  onToggleSelected: (path: string) => void;
+}): React.JSX.Element {
   if (props.changes.length === 0) {
     return <div style={{ opacity: 0.8 }}>No changes detected.</div>;
   }
@@ -22,7 +22,7 @@ export function FileChangeList(props: { changes: readonly FileChange[] }): React
           key={`${c.kind}:${c.path}`}
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr auto",
+            gridTemplateColumns: "auto 1fr auto",
             gap: 12,
             alignItems: "center",
             padding: "8px 10px",
@@ -30,6 +30,13 @@ export function FileChangeList(props: { changes: readonly FileChange[] }): React
             borderRadius: 8
           }}
         >
+          <input
+            type="checkbox"
+            checked={props.selectedPaths.has(c.path)}
+            disabled={!c.canStage}
+            onChange={() => props.onToggleSelected(c.path)}
+            aria-label={`Select ${c.path}`}
+          />
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
               {c.path}
@@ -44,7 +51,7 @@ export function FileChangeList(props: { changes: readonly FileChange[] }): React
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {c.kind === "untracked" ? <StatusBadge label="Untracked" variant="untracked" /> : null}
-            {isStaged(c) ? <StatusBadge label="Staged" variant="staged" /> : null}
+            {c.isStaged ? <StatusBadge label="Staged" variant="staged" /> : null}
             {isModified(c) ? <StatusBadge label="Modified" variant="modified" /> : null}
           </div>
         </div>

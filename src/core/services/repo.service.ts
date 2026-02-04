@@ -1,5 +1,5 @@
-import type { RepoInfo, RepoPath } from "../domain/repo";
-import { ok, type Result } from "../shell/command.errors";
+import type { CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
+import { err, ok, type Result } from "../shell/command.errors";
 import { gitService, type GitService } from "./git.service";
 
 export class RepoService {
@@ -22,6 +22,41 @@ export class RepoService {
       changes: statusRes.data
     };
     return ok(info);
+  }
+
+  async stageAll(path: RepoPath): Promise<Result<RepoInfo>> {
+    const staged = await this.git.stageAll(path);
+    if (!staged.ok) return staged;
+    return this.loadRepo(path);
+  }
+
+  async stageFiles(path: RepoPath, files: string[]): Promise<Result<RepoInfo>> {
+    const staged = await this.git.stageFiles(path, files);
+    if (!staged.ok) return staged;
+    return this.loadRepo(path);
+  }
+
+  async unstageAll(path: RepoPath): Promise<Result<RepoInfo>> {
+    const unstaged = await this.git.unstageAll(path);
+    if (!unstaged.ok) return unstaged;
+    return this.loadRepo(path);
+  }
+
+  async unstageFiles(path: RepoPath, files: string[]): Promise<Result<RepoInfo>> {
+    const unstaged = await this.git.unstageFiles(path, files);
+    if (!unstaged.ok) return unstaged;
+    return this.loadRepo(path);
+  }
+
+  async commit(path: RepoPath, message: CommitMessage): Promise<Result<RepoInfo>> {
+    const statusRes = await this.git.getStatus(path);
+    if (!statusRes.ok) return statusRes;
+    const hasStaged = statusRes.data.some((c) => c.isStaged);
+    if (!hasStaged) return err("INVALID_INPUT", "Nothing staged to commit.");
+
+    const committed = await this.git.commit(path, message);
+    if (!committed.ok) return committed;
+    return this.loadRepo(path);
   }
 }
 
