@@ -1,6 +1,7 @@
 import type { CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
 import { err, ok, type Result } from "../shell/command.errors";
 import { gitService, type GitService } from "./git.service";
+import { parseBranchName } from "../utils/guard";
 
 export class RepoService {
   constructor(private readonly git: GitService) {}
@@ -57,6 +58,19 @@ export class RepoService {
     const committed = await this.git.commit(path, message);
     if (!committed.ok) return committed;
     return this.loadRepo(path);
+  }
+
+  async pushCurrentBranch(path: RepoPath): Promise<Result<void>> {
+    const branchRes = await this.git.getBranch(path);
+    if (!branchRes.ok) return branchRes;
+
+    const branch = parseBranchName(branchRes.data);
+    if (!branch.ok) return branch;
+
+    const origin = await this.git.ensureOriginRemote(path);
+    if (!origin.ok) return origin;
+
+    return this.git.pushSetUpstream(path, branch.data);
   }
 }
 

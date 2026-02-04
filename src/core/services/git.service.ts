@@ -1,4 +1,5 @@
 import type { CommitMessage, FileChange, RepoPath } from "../domain/repo";
+import type { BranchName } from "../domain/git";
 import { parseGitStatusPorcelainV1 } from "../parsers/gitStatus.parser";
 import { commandRunner } from "../shell/commandRunner";
 import { commandToString, err, isTimeoutResponse, ok, type Result } from "../shell/command.errors";
@@ -124,6 +125,43 @@ export class GitService {
 
   async commit(path: RepoPath, message: CommitMessage): Promise<Result<void>> {
     return this.runGitVoid(path, "commit", ["commit", "-m", message as string], 60_000);
+  }
+
+  async ensureOriginRemote(path: RepoPath): Promise<Result<string>> {
+    const args = ["remote", "get-url", "origin"];
+    const res = await commandRunner.run({
+      name: "gitRemoteOrigin",
+      cwd: cwdOf(path),
+      program: "git",
+      args,
+      timeoutMs: 10_000
+    });
+    if (!res.ok) return res;
+    if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
+    if (res.data.exitCode !== 0) {
+      const combined = `${res.data.stdout}\n${res.data.stderr}`.toLowerCase();
+      if (combined.includes("no such remote") && combined.includes("origin")) {
+        return err("NO_REMOTE", "No 'origin' remote found.", {
+          exitCode: res.data.exitCode,
+          stdout: res.data.stdout,
+          stderr: res.data.stderr,
+          command: commandToString("gitRemoteOrigin", "git", args)
+        });
+      }
+      return err("CMD_FAILED", "Failed to read 'origin' remote.", {
+        exitCode: res.data.exitCode,
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString("gitRemoteOrigin", "git", args)
+      });
+    }
+    return ok(res.data.stdout.trim());
+  }
+
+  async pushSetUpstream(path: RepoPath, branch: BranchName): Promise<Result<void>> {
+    const b = (branch as string).trim();
+    if (b.length === 0) return err("INVALID_INPUT", "Invalid branch name.");
+    return this.runGitVoid(path, "pushSetUpstream", ["push", "-u", "origin", b], 120_000);
   }
 }
 
