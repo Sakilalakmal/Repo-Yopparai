@@ -1,14 +1,26 @@
 import type { BranchName, CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
 import type { PullRequest } from "../domain/pr";
+import type { RecentRepo } from "../domain/recentRepo";
 import { err, ok, type Result } from "../shell/command.errors";
+import { commandLogger } from "../utils/logger";
+import { recentReposStore, type RecentReposStore } from "../store/recentRepos.store";
 import { gitService, type GitService } from "./git.service";
 import { githubService, type GitHubService } from "./github.service";
 import { parseBaseBranchName, parseBranchName } from "../utils/guard";
 
+function repoNameFromPath(path: RepoPath): string {
+  const trimmed = String(path).replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[/\\]/);
+  const last = parts.at(-1)?.trim();
+  if (last && last.length > 0) return last;
+  return trimmed;
+}
+
 export class RepoService {
   constructor(
     private readonly git: GitService,
-    private readonly github: GitHubService
+    private readonly github: GitHubService,
+    private readonly recentRepos: RecentReposStore
   ) {}
 
   async loadRepo(path: RepoPath): Promise<Result<RepoInfo>> {
@@ -34,6 +46,27 @@ export class RepoService {
       hasUntracked,
       changes: statusRes.data
     };
+
+    const recent: RecentRepo = {
+      path,
+      name: repoNameFromPath(path),
+      lastOpenedAt: new Date().toISOString()
+    };
+    const saved = await this.recentRepos.add(recent);
+    if (!saved.ok) {
+      console.warn("Failed to save recent repo:", saved.error);
+      commandLogger.add({
+        name: "recent-repos.save",
+        args: [String(path)],
+        cwd: String(path),
+        startedAt: new Date().toISOString(),
+        durationMs: 0,
+        exitCode: -1,
+        ok: false,
+        stdout: "",
+        stderr: `${saved.error.code}: ${saved.error.message}`
+      });
+    }
     return ok(info);
   }
 
@@ -205,4 +238,4 @@ export class RepoService {
   }
 }
 
-export const repoService = new RepoService(gitService, githubService);
+export const repoService = new RepoService(gitService, githubService, recentReposStore);

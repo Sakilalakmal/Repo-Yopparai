@@ -6,6 +6,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use tauri::Manager;
 use wait_timeout::ChildExt;
 
 #[derive(Debug, Deserialize)]
@@ -105,10 +106,51 @@ async fn run_command(request: RunCommandRequest) -> Result<RunCommandResponse, S
   })
 }
 
+fn recent_repos_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  let dir = app
+    .path()
+    .app_data_dir()
+    .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
+  Ok(dir.join("recent-repos.json"))
+}
+
+#[tauri::command]
+async fn load_recent_repos_json(app: tauri::AppHandle) -> Result<Option<String>, String> {
+  let path = recent_repos_file_path(&app)?;
+  if !path.exists() {
+    return Ok(None);
+  }
+  std::fs::read_to_string(&path)
+    .map(Some)
+    .map_err(|e| format!("failed to read recent repos: {e}"))
+}
+
+#[tauri::command]
+async fn save_recent_repos_json(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+  let path = recent_repos_file_path(&app)?;
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).map_err(|e| format!("failed to create app data dir: {e}"))?;
+  }
+
+  let mut tmp = path.clone();
+  tmp.set_extension("json.tmp");
+
+  std::fs::write(&tmp, contents).map_err(|e| format!("failed to write temp recent repos: {e}"))?;
+  if path.exists() {
+    std::fs::remove_file(&path).map_err(|e| format!("failed to remove old recent repos: {e}"))?;
+  }
+  std::fs::rename(&tmp, &path).map_err(|e| format!("failed to replace recent repos: {e}"))?;
+  Ok(())
+}
+
 fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
-    .invoke_handler(tauri::generate_handler![run_command])
+    .invoke_handler(tauri::generate_handler![
+      run_command,
+      load_recent_repos_json,
+      save_recent_repos_json
+    ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }

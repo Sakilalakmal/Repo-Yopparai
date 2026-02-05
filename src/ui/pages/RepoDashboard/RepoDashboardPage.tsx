@@ -2,11 +2,15 @@ import React from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { RepoInfo, RepoPath } from "../../../core/domain/repo";
 import type { PullRequest } from "../../../core/domain/pr";
+import type { RecentRepoList } from "../../../core/domain/recentRepo";
 import type { AppError } from "../../../core/shell/command.errors";
 import { repoService } from "../../../core/services/repo.service";
+import { recentReposStore } from "../../../core/store/recentRepos.store";
+import { formatRelativeTime } from "../../../core/utils/format";
 import { parseBranchName, parseCommitMessage, toRepoPath } from "../../../core/utils/guard";
 import { computeWorkflowStep } from "../../../core/utils/workflow";
 import { CommandLogPanel } from "../../components/CommandLogPanel/CommandLogPanel";
+import { ConfirmDialog } from "../../components/ConfirmDialog/ConfirmDialog";
 import { FileChangeList } from "../../components/FileChangeList/FileChangeList";
 import { StatusBadge } from "../../components/StatusBadge/StatusBadge";
 import { Badge } from "../../components/ui/badge";
@@ -14,6 +18,7 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
 import { Input } from "../../components/ui/input";
+import { ScrollArea } from "../../components/ui/scroll-area";
 import { Separator } from "../../components/ui/separator";
 import { Textarea } from "../../components/ui/textarea";
 
@@ -64,9 +69,25 @@ export function RepoDashboardPage(): React.JSX.Element {
 
   const [logOpen, setLogOpen] = React.useState(false);
 
+  const [recentRepos, setRecentRepos] = React.useState<RecentRepoList>([]);
+  const [confirmClearRecentsOpen, setConfirmClearRecentsOpen] = React.useState(false);
+
   const currentBranch = repoInfo?.branch ?? "";
   const isOnMain = currentBranch.trim() === "main";
   const workflowStep = repoInfo ? computeWorkflowStep(repoInfo, pullRequest, isPublished) : null;
+
+  async function refreshRecentRepos(): Promise<void> {
+    const res = await recentReposStore.load();
+    if (!res.ok) {
+      console.warn("Failed to load recent repos:", res.error);
+      return;
+    }
+    setRecentRepos(res.data);
+  }
+
+  React.useEffect(() => {
+    void refreshRecentRepos();
+  }, []);
 
   React.useEffect(() => {
     const b = repoInfo?.branch;
@@ -114,6 +135,37 @@ export function RepoDashboardPage(): React.JSX.Element {
     if (pullRequest.headRefName.trim() !== current) setPullRequest(null);
   }, [repoInfo, pullRequest]);
 
+  async function openRepoAtPath(rp: RepoPath): Promise<void> {
+    setError(null);
+    setLoading(true);
+    setRepoInfo(null);
+    setRepoPath(rp);
+    setSelectedPaths(new Set());
+    setCommitMessage("");
+    setNewBranchName("");
+    setLocalBranches([]);
+    setSwitchBranchName("");
+    setIsPublished(false);
+    setPullRequest(null);
+    setPrTitle("");
+    setPrBody("");
+
+    const res = await repoService.loadRepo(rp);
+    if (!res.ok) {
+      setError(res.error);
+      setRepoInfo(null);
+      setLoading(false);
+      return;
+    }
+
+    setRepoInfo(res.data);
+    await refreshLocalBranches(rp);
+    setSelectedPaths(new Set());
+    setLoading(false);
+
+    void refreshRecentRepos();
+  }
+
   React.useEffect(() => {
     if (!repoInfo || !autoSelectUntracked) return;
     const untracked = repoInfo.changes.filter((c) => c.kind === "untracked" && c.stageable).map((c) => c.path);
@@ -159,23 +211,32 @@ export function RepoDashboardPage(): React.JSX.Element {
         return;
       }
 
-      setRepoPath(rp.data);
-      const res = await repoService.loadRepo(rp.data);
-      if (!res.ok) {
-        setError(res.error);
-        setRepoInfo(null);
-        setLoading(false);
-        return;
-      }
-
-      setRepoInfo(res.data);
-      await refreshLocalBranches(rp.data);
-      setSelectedPaths(new Set());
-      setLoading(false);
+      await openRepoAtPath(rp.data);
     } catch (_e: unknown) {
       setLoading(false);
       setError({ code: "TAURI_ERROR", message: "Failed to open folder picker." });
     }
+  }
+
+  async function onRemoveRecent(rp: RepoPath): Promise<void> {
+    const res = await recentReposStore.remove(rp);
+    if (!res.ok) {
+      console.warn("Failed to remove recent repo:", res.error);
+      return;
+    }
+    setRecentRepos(res.data);
+  }
+
+  function onConfirmClearRecents(): void {
+    setConfirmClearRecentsOpen(false);
+    void (async () => {
+      const res = await recentReposStore.clear();
+      if (!res.ok) {
+        console.warn("Failed to clear recent repos:", res.error);
+        return;
+      }
+      setRecentRepos(res.data);
+    })();
   }
 
   async function onCreateAndSwitchBranch(): Promise<void> {
@@ -388,6 +449,68 @@ export function RepoDashboardPage(): React.JSX.Element {
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
+          <Card>
+            <CardHeader className="flex flex-row items-start justify-between space-y-0">
+              <div className="space-y-1.5">
+                <CardTitle>Recent Repositories</CardTitle>
+                <CardDescription>Quickly reopen a recently used repo.</CardDescription>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setConfirmClearRecentsOpen(true)}
+                disabled={recentRepos.length === 0 || loading}
+              >
+                Clear
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {recentRepos.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  No recent repositories yet. Open one to get started.
+                </div>
+              ) : (
+                <ScrollArea className="max-h-64 pr-2">
+                  <div className="space-y-3">
+                    {recentRepos.map((r) => (
+                      <div key={r.path} className="rounded-md border p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{r.name}</div>
+                            <div className="mt-1 truncate text-xs text-muted-foreground">
+                              <code className="rounded bg-muted px-1 py-0.5">{r.path}</code>
+                            </div>
+                            <div className="mt-2 text-xs text-muted-foreground">
+                              Last opened {formatRelativeTime(r.lastOpenedAt)}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => void openRepoAtPath(r.path)}
+                              disabled={loading}
+                            >
+                              Open
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => void onRemoveRecent(r.path)}
+                              disabled={loading}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Branch</CardTitle>
@@ -629,6 +752,16 @@ export function RepoDashboardPage(): React.JSX.Element {
           </Card>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmClearRecentsOpen}
+        title="Clear recent repositories?"
+        message="This will remove all recent repositories from this device."
+        confirmLabel="Clear"
+        cancelLabel="Cancel"
+        onConfirm={onConfirmClearRecents}
+        onCancel={() => setConfirmClearRecentsOpen(false)}
+      />
     </div>
   );
 }
