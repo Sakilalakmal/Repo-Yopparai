@@ -51,6 +51,8 @@ export function RepoDashboardPage(): React.JSX.Element {
   const [loading, setLoading] = React.useState(false);
 
   const [newBranchName, setNewBranchName] = React.useState("");
+  const [localBranches, setLocalBranches] = React.useState<readonly string[]>([]);
+  const [switchBranchName, setSwitchBranchName] = React.useState("");
   const [autoSelectUntracked, setAutoSelectUntracked] = React.useState(true);
   const [selectedPaths, setSelectedPaths] = React.useState<ReadonlySet<string>>(() => new Set());
   const [commitMessage, setCommitMessage] = React.useState("");
@@ -66,6 +68,15 @@ export function RepoDashboardPage(): React.JSX.Element {
   const isOnMain = currentBranch.trim() === "main";
   const workflowStep = repoInfo ? computeWorkflowStep(repoInfo, pullRequest, isPublished) : null;
 
+  React.useEffect(() => {
+    const b = repoInfo?.branch;
+    if (!b) {
+      setSwitchBranchName("");
+      return;
+    }
+    setSwitchBranchName(b.trim());
+  }, [repoInfo?.branch]);
+
   const selectedStageableFiles = React.useMemo(() => {
     if (!repoInfo) return [];
     return repoInfo.changes.filter((c) => selectedPaths.has(c.path) && c.stageable).map((c) => c.path);
@@ -78,6 +89,16 @@ export function RepoDashboardPage(): React.JSX.Element {
       else next.add(path);
       return next;
     });
+  }
+
+  async function refreshLocalBranches(path: RepoPath): Promise<void> {
+    const res = await repoService.listBranches(path);
+    if (!res.ok) {
+      setError(res.error);
+      setLocalBranches([]);
+      return;
+    }
+    setLocalBranches(res.data);
   }
 
   const lastBranchRef = React.useRef<string | null>(null);
@@ -112,6 +133,8 @@ export function RepoDashboardPage(): React.JSX.Element {
     setSelectedPaths(new Set());
     setCommitMessage("");
     setNewBranchName("");
+    setLocalBranches([]);
+    setSwitchBranchName("");
     setIsPublished(false);
     setPullRequest(null);
     setPrTitle("");
@@ -146,6 +169,7 @@ export function RepoDashboardPage(): React.JSX.Element {
       }
 
       setRepoInfo(res.data);
+      await refreshLocalBranches(rp.data);
       setSelectedPaths(new Set());
       setLoading(false);
     } catch (_e: unknown) {
@@ -172,6 +196,31 @@ export function RepoDashboardPage(): React.JSX.Element {
     setRepoInfo(res.data);
     setNewBranchName("");
     setSelectedPaths(new Set());
+    setIsPublished(false);
+    setPullRequest(null);
+    await refreshLocalBranches(res.data.path);
+    setLoading(false);
+  }
+
+  async function onSwitchBranch(): Promise<void> {
+    if (!repoInfo) return;
+    const target = switchBranchName.trim();
+    if (target.length === 0) return;
+    if (target === repoInfo.branch.trim()) return;
+
+    setError(null);
+    setLoading(true);
+    const res = await repoService.switchToBranch(repoInfo.path, target);
+    if (!res.ok) {
+      setError(res.error);
+      setLoading(false);
+      return;
+    }
+    setRepoInfo(res.data);
+    setSelectedPaths(new Set());
+    setIsPublished(false);
+    setPullRequest(null);
+    await refreshLocalBranches(res.data.path);
     setLoading(false);
   }
 
@@ -285,6 +334,8 @@ export function RepoDashboardPage(): React.JSX.Element {
   }
 
   const createBranchDisabled = !repoInfo || loading || !parseBranchName(newBranchName).ok;
+  const switchBranchDisabled =
+    !repoInfo || loading || switchBranchName.trim().length === 0 || switchBranchName.trim() === currentBranch.trim();
   const trackUntrackedDisabled = !repoInfo || loading || !repoInfo.hasUntracked;
   const stageSelectedDisabled = !repoInfo || loading || selectedStageableFiles.length === 0;
   const stageAllDisabled = !repoInfo || loading || repoInfo.stageableCount === 0;
@@ -352,6 +403,28 @@ export function RepoDashboardPage(): React.JSX.Element {
                 />
                 <Button onClick={() => void onCreateAndSwitchBranch()} disabled={createBranchDisabled}>
                   Create &amp; Switch
+                </Button>
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <select
+                  value={switchBranchName}
+                  onChange={(e) => setSwitchBranchName(e.target.value)}
+                  disabled={!repoInfo || loading || localBranches.length === 0}
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {localBranches.length === 0 ? (
+                    <option value="">No branches</option>
+                  ) : (
+                    localBranches.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <Button variant="secondary" onClick={() => void onSwitchBranch()} disabled={switchBranchDisabled}>
+                  Switch
                 </Button>
               </div>
               {repoInfo && isOnMain ? (
