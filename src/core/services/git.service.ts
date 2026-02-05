@@ -194,6 +194,32 @@ export class GitService {
     return ok(branches);
   }
 
+  async branchExists(path: RepoPath, branch: BranchName): Promise<Result<boolean>> {
+    const b = (branch as string).trim();
+    if (b.length === 0) return err("INVALID_INPUT", "Invalid branch name.");
+
+    const args = ["branch", "--list", b];
+    const res = await commandRunner.run({
+      name: "branchExists",
+      cwd: cwdOf(path),
+      program: "git",
+      args,
+      timeoutMs: 10_000
+    });
+    if (!res.ok) return res;
+    if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
+    if (res.data.exitCode !== 0) {
+      return err("CMD_FAILED", "Failed to check branch existence.", {
+        exitCode: res.data.exitCode,
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString("branchExists", "git", args)
+      });
+    }
+
+    return ok(res.data.stdout.trim().length > 0);
+  }
+
   async ensureOriginRemote(path: RepoPath): Promise<Result<string>> {
     const args = ["remote", "get-url", "origin"];
     const res = await commandRunner.run({

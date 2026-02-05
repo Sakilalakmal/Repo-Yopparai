@@ -86,13 +86,24 @@ export class RepoService {
   }
 
   async createAndSwitchBranch(path: RepoPath, branch: BranchName): Promise<Result<RepoInfo>> {
-    const created = await this.git.createAndCheckoutBranch(path, branch);
-    if (!created.ok) return created;
+    return this.createOrSwitchBranch(path, branch);
+  }
+
+  async createOrSwitchBranch(path: RepoPath, branch: BranchName): Promise<Result<RepoInfo>> {
+    const exists = await this.git.branchExists(path, branch);
+    if (!exists.ok) return exists;
+
+    const updated = exists.data
+      ? await this.git.checkoutBranch(path, branch)
+      : await this.git.createAndCheckoutBranch(path, branch);
+    if (!updated.ok) return updated;
+
     return this.loadRepo(path);
   }
 
-  async switchToBranch(path: RepoPath, branch: string): Promise<Result<RepoInfo>> {
-    const trimmed = branch.trim();
+  async switchToBranch(path: RepoPath, branchName: string): Promise<Result<RepoInfo>> {
+    const trimmed = branchName.trim();
+    if (trimmed.length === 0) return err("INVALID_INPUT", "Branch name is required.");
     let target: BranchName | "main";
     if (trimmed === "main") target = "main";
     else {
@@ -116,9 +127,7 @@ export class RepoService {
     if (current.data.stagedCount > 0) {
       return err("DIRTY_SWITCH_BLOCKED", "You have staged changes. Commit or unstage before switching branches.");
     }
-    const created = await this.git.createAndCheckoutBranch(path, branch);
-    if (!created.ok) return created;
-    return this.loadRepo(path);
+    return this.createOrSwitchBranch(path, branch);
   }
 
   async stageAllUntrackedFlow(path: RepoPath): Promise<Result<RepoInfo>> {
