@@ -1,6 +1,7 @@
 import type { BranchName, CommitMessage, RepoInfo, RepoPath } from "../domain/repo";
 import type { PullRequest } from "../domain/pr";
 import type { RecentRepo } from "../domain/recentRepo";
+import type { PrChecks } from "../domain/ci";
 import { err, ok, type Result } from "../shell/command.errors";
 import { commandLogger } from "../utils/logger";
 import { recentReposStore, type RecentReposStore } from "../store/recentRepos.store";
@@ -219,13 +220,17 @@ export class RepoService {
     return this.github.createPr({ repoPath, base, head, title });
   }
 
+  async refreshPrChecks(repoPath: RepoPath): Promise<Result<PrChecks>> {
+    return this.github.getPrChecks(repoPath);
+  }
+
   async mergeAndSyncMainFlow(path: RepoPath, prNumber: number): Promise<Result<RepoInfo>> {
     const installed = await this.github.ensureGhInstalled(path);
     if (!installed.ok) return installed;
     const authed = await this.github.ensureGhAuthed(path);
     if (!authed.ok) return authed;
 
-    const merged = await this.github.mergePrSquashDeleteBranch(path, prNumber);
+    const merged = await this.github.mergePr(path, prNumber);
     if (!merged.ok) return merged;
 
     const checkedOut = await this.git.checkoutMain(path);
