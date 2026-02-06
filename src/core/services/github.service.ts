@@ -1,6 +1,8 @@
 import type { BaseBranchName, BranchName } from "../domain/repo";
 import type { PullRequest } from "../domain/pr";
+import type { PrChecks } from "../domain/ci";
 import { parseGhPrJson } from "../parsers/ghPr.parser";
+import { parseStatusCheckRollup } from "../parsers/ghChecks.parser";
 import { commandRunner } from "../shell/commandRunner";
 import { commandToString, err, isTimeoutResponse, ok, type Result } from "../shell/command.errors";
 import type { RepoPath } from "../domain/repo";
@@ -162,12 +164,52 @@ export class GitHubService {
     return parsed;
   }
 
-  async mergePrSquashDeleteBranch(repoPath: RepoPath, prNumber: number): Promise<Result<void>> {
+  async getPrChecks(repoPath: RepoPath): Promise<Result<PrChecks>> {
     const installed = await this.ensureGhInstalled(repoPath);
     if (!installed.ok) return installed;
     const authed = await this.ensureGhAuthed(repoPath);
     if (!authed.ok) return authed;
 
+    const jsonFields = "statusCheckRollup,url,number,title,state";
+    const args = ["pr", "view", "--json", jsonFields];
+    const res = await commandRunner.run({
+      name: "ghPrViewChecks",
+      cwd: cwdOf(repoPath),
+      program: "gh",
+      args,
+      timeoutMs: 30_000
+    });
+    if (!res.ok) return res;
+    if (isTimeoutResponse(res.data)) return err("TIMEOUT", "Command timed out.");
+    if (res.data.exitCode !== 0) {
+      if (isPrNotFound(res.data.stdout, res.data.stderr)) {
+        return err("PR_NOT_FOUND", "No pull request found for the current branch.", {
+          exitCode: res.data.exitCode,
+          stdout: res.data.stdout,
+          stderr: res.data.stderr,
+          command: commandToString("ghPrViewChecks", "gh", args)
+        });
+      }
+      return err("CMD_FAILED", "Failed to view pull request checks.", {
+        exitCode: res.data.exitCode,
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString("ghPrViewChecks", "gh", args)
+      });
+    }
+
+    const parsed = parseStatusCheckRollup(res.data.stdout);
+    if (!parsed.ok) {
+      return err(parsed.error.code, parsed.error.message, {
+        stdout: res.data.stdout,
+        stderr: res.data.stderr,
+        command: commandToString("ghPrViewChecks", "gh", args)
+      });
+    }
+    return parsed;
+  }
+
+  async mergePr(repoPath: RepoPath, prNumber: number): Promise<Result<void>> {
     const args = ["pr", "merge", String(prNumber), "--squash", "--delete-branch"];
     const res = await commandRunner.run({
       name: "ghPrMergeSquash",
@@ -187,6 +229,15 @@ export class GitHubService {
       });
     }
     return ok(undefined);
+  }
+
+  async mergePrSquashDeleteBranch(repoPath: RepoPath, prNumber: number): Promise<Result<void>> {
+    const installed = await this.ensureGhInstalled(repoPath);
+    if (!installed.ok) return installed;
+    const authed = await this.ensureGhAuthed(repoPath);
+    if (!authed.ok) return authed;
+
+    return this.mergePr(repoPath, prNumber);
   }
 }
 

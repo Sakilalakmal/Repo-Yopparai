@@ -2,6 +2,7 @@ import React from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { RepoInfo, RepoPath } from "../../../core/domain/repo";
 import type { PullRequest } from "../../../core/domain/pr";
+import type { PrChecks } from "../../../core/domain/ci";
 import type { RecentRepoList } from "../../../core/domain/recentRepo";
 import type { AppError } from "../../../core/shell/command.errors";
 import { repoService } from "../../../core/services/repo.service";
@@ -21,6 +22,7 @@ import { Input } from "../../components/ui/input";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { Separator } from "../../components/ui/separator";
 import { Textarea } from "../../components/ui/textarea";
+import { openExternalUrl } from "../../lib/openExternal";
 
 function ErrorBlock(props: { error: AppError }): React.JSX.Element {
   const detailsText = props.error.details ? JSON.stringify(props.error.details, null, 2) : null;
@@ -66,6 +68,8 @@ export function RepoDashboardPage(): React.JSX.Element {
   const [prTitle, setPrTitle] = React.useState("");
   const [prBody, setPrBody] = React.useState("");
   const [pullRequest, setPullRequest] = React.useState<PullRequest | null>(null);
+  const [prChecks, setPrChecks] = React.useState<PrChecks | null>(null);
+  const [prChecksLoading, setPrChecksLoading] = React.useState(false);
 
   const [logOpen, setLogOpen] = React.useState(false);
 
@@ -127,13 +131,56 @@ export function RepoDashboardPage(): React.JSX.Element {
     if (!repoInfo) return;
     const current = repoInfo.branch.trim();
     const prev = lastBranchRef.current;
-    if (prev !== null && prev !== current) setIsPublished(false);
+    if (prev !== null && prev !== current) {
+      setIsPublished(false);
+      setPrChecks(null);
+    }
     lastBranchRef.current = current;
 
     if (!pullRequest) return;
     if ((pullRequest.state === "MERGED" || pullRequest.state === "CLOSED") && current === "main") return;
-    if (pullRequest.headRefName.trim() !== current) setPullRequest(null);
+    if (pullRequest.headRefName.trim() !== current) {
+      setPullRequest(null);
+      setPrChecks(null);
+    }
   }, [repoInfo, pullRequest]);
+
+  const refreshPrChecks = React.useCallback(async (): Promise<void> => {
+    const path = repoInfo?.path;
+    if (!path) return;
+
+    setPrChecksLoading(true);
+    const res = await repoService.refreshPrChecks(path);
+    if (!res.ok) {
+      setError(res.error);
+      setPrChecksLoading(false);
+      return;
+    }
+    setError(null);
+    setPrChecks(res.data);
+    setPrChecksLoading(false);
+  }, [repoInfo?.path]);
+
+  React.useEffect(() => {
+    if (!repoInfo?.path || !pullRequest?.number) return;
+    if (prChecks?.overall !== "RUNNING") return;
+    const id = window.setInterval(() => {
+      void refreshPrChecks();
+    }, 5_000);
+    return () => window.clearInterval(id);
+  }, [repoInfo?.path, pullRequest?.number, prChecks?.overall, refreshPrChecks]);
+
+  const openExternal = React.useCallback(
+    async (url: string): Promise<void> => {
+      try {
+        await openExternalUrl(url);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Unknown error";
+        setError({ code: "TAURI_ERROR", message: "Failed to open external link.", details: { stderr: msg } });
+      }
+    },
+    [setError]
+  );
 
   async function openRepoAtPath(rp: RepoPath): Promise<void> {
     setError(null);
@@ -147,6 +194,7 @@ export function RepoDashboardPage(): React.JSX.Element {
     setSwitchBranchName("");
     setIsPublished(false);
     setPullRequest(null);
+    setPrChecks(null);
     setPrTitle("");
     setPrBody("");
 
@@ -189,6 +237,7 @@ export function RepoDashboardPage(): React.JSX.Element {
     setSwitchBranchName("");
     setIsPublished(false);
     setPullRequest(null);
+    setPrChecks(null);
     setPrTitle("");
     setPrBody("");
 
@@ -376,7 +425,9 @@ export function RepoDashboardPage(): React.JSX.Element {
       return;
     }
     setPullRequest(res.data);
+    setPrChecks(null);
     setLoading(false);
+    void refreshPrChecks();
   }
 
   async function onMergeAndSync(): Promise<void> {
@@ -391,6 +442,7 @@ export function RepoDashboardPage(): React.JSX.Element {
     }
     setRepoInfo(res.data);
     setPullRequest({ ...pullRequest, state: "MERGED" });
+    setPrChecks(null);
     setLoading(false);
   }
 
@@ -403,7 +455,11 @@ export function RepoDashboardPage(): React.JSX.Element {
   const commitDisabled = !repoInfo || loading || repoInfo.stagedCount === 0 || !parseCommitMessage(commitMessage).ok;
   const publishDisabled = !repoInfo || loading || isOnMain;
   const ensurePrDisabled = !repoInfo || loading || isOnMain || !isPublished;
-  const mergeDisabled = !repoInfo || loading || isOnMain || !isPublished || !pullRequest || pullRequest.state !== "OPEN";
+  const openPrDisabled =
+    !pullRequest || loading || !pullRequest.url.trim().startsWith("https://");
+  const refreshChecksDisabled = !repoInfo || loading || !pullRequest || prChecksLoading;
+  const checksOverall = prChecks?.overall ?? "UNKNOWN";
+  const mergeDisabled = !repoInfo || loading || isOnMain || !pullRequest || pullRequest.state !== "OPEN" || checksOverall !== "PASS";
 
   return (
     <div className="mx-auto max-w-6xl p-6">
@@ -681,49 +737,119 @@ export function RepoDashboardPage(): React.JSX.Element {
 
               {pullRequest ? (
                 <div className="rounded-md border p-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="font-semibold">
-                      #{pullRequest.number} {pullRequest.title}
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="font-semibold">
+                          #{pullRequest.number} {pullRequest.title}
+                        </div>
+                        <StatusBadge
+                          label={pullRequest.state}
+                          variant={
+                            pullRequest.state === "OPEN"
+                              ? "clean"
+                              : pullRequest.state === "MERGED"
+                                ? "staged"
+                                : "dirty"
+                          }
+                        />
+                        {pullRequest.isDraft ? <StatusBadge label="DRAFT" variant="modified" /> : null}
+                        <Badge
+                          variant={
+                            checksOverall === "PASS"
+                              ? "default"
+                              : checksOverall === "FAIL"
+                                ? "destructive"
+                                : checksOverall === "RUNNING"
+                                  ? "secondary"
+                                  : "outline"
+                          }
+                        >
+                          checks: {checksOverall}
+                        </Badge>
+                        {prChecksLoading ? <span className="text-xs text-muted-foreground">refreshing…</span> : null}
+                      </div>
+                      <div className="mt-2 text-sm text-muted-foreground">
+                        url: <code className="rounded bg-muted px-1 py-0.5 break-all">{pullRequest.url}</code>
+                      </div>
                     </div>
-                    <StatusBadge
-                      label={pullRequest.state}
-                      variant={
-                        pullRequest.state === "OPEN"
-                          ? "clean"
-                          : pullRequest.state === "MERGED"
-                            ? "staged"
-                            : "dirty"
-                      }
-                    />
-                    {pullRequest.isDraft ? <StatusBadge label="DRAFT" variant="modified" /> : null}
+
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => void openExternal(pullRequest.url)}
+                        disabled={openPrDisabled}
+                      >
+                        Open PR
+                      </Button>
+                      <Button variant="secondary" onClick={() => void refreshPrChecks()} disabled={refreshChecksDisabled}>
+                        Refresh Checks
+                      </Button>
+                      <Button onClick={() => void onMergeAndSync()} disabled={mergeDisabled}>
+                        Merge (Squash) + Sync main
+                      </Button>
+                    </div>
                   </div>
-                  <div className="mt-2 text-sm">
-                    <a className="text-primary underline underline-offset-4" href={pullRequest.url} target="_blank" rel="noreferrer">
-                      {pullRequest.url}
-                    </a>
-                  </div>
+
+                  {!mergeDisabled && checksOverall === "PASS" ? null : (
+                    pullRequest.state === "OPEN" && checksOverall !== "PASS" ? (
+                      <div className="mt-2 text-sm text-muted-foreground">Merge enabled when checks pass.</div>
+                    ) : null
+                  )}
+
                   <div className="mt-2 text-sm text-muted-foreground">
                     base: <code className="rounded bg-muted px-1 py-0.5">{pullRequest.baseRefName}</code> • head:{" "}
                     <code className="rounded bg-muted px-1 py-0.5">{pullRequest.headRefName}</code>
                   </div>
+
+                  <div className="mt-4 space-y-2">
+                    {prChecks === null ? (
+                      <div className="text-sm text-muted-foreground">Checks not loaded yet.</div>
+                    ) : prChecks.checks.length > 0 ? (
+                      <div className="space-y-2">
+                        {prChecks.checks.map((c) => (
+                          <div key={`${c.name}-${c.detailsUrl ?? ""}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/10 px-3 py-2">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium">{c.name}</div>
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                <Badge variant={c.status === "COMPLETED" ? "outline" : "secondary"}>{c.status}</Badge>
+                                <Badge
+                                  variant={
+                                    c.conclusion === "SUCCESS"
+                                      ? "default"
+                                      : c.conclusion === "FAILURE" || c.conclusion === "CANCELLED" || c.conclusion === "TIMED_OUT"
+                                        ? "destructive"
+                                        : c.conclusion === "UNKNOWN"
+                                          ? "outline"
+                                          : "secondary"
+                                  }
+                                >
+                                  {c.conclusion}
+                                </Badge>
+                              </div>
+                            </div>
+                            {c.detailsUrl ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void openExternal(c.detailsUrl!)}
+                                disabled={loading}
+                              >
+                                Open
+                              </Button>
+                            ) : null}
+                          </div>
+                        ))}
+                        <div className="text-xs text-muted-foreground">
+                          Updated: {formatRelativeTime(prChecks.updatedAt)}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">No checks found.</div>
+                    )}
+                  </div>
                 </div>
               ) : null}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Merge &amp; Sync</CardTitle>
-              <CardDescription>Squash merge the PR, delete the branch, switch to main, and pull latest.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Button onClick={() => void onMergeAndSync()} disabled={mergeDisabled}>
-                Merge PR + Sync main
-              </Button>
-              <div className="text-sm text-muted-foreground">
-                Enabled when PR is open, branch is published, and branch is not{" "}
-                <code className="rounded bg-muted px-1 py-0.5">main</code>.
-              </div>
             </CardContent>
           </Card>
         </div>
